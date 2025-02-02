@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HomePod Audio Toggle</title>
+    <style>
+        body { font-family: Arial, sans-serif; text-align: center; padding: 50px; }
+        button { font-size: 20px; padding: 10px 20px; margin-top: 20px; cursor: pointer; }
+        .status { font-size: 24px; font-weight: bold; margin-top: 20px; }
+    </style>
+    <script>
+        function toggleAudio() {
+            fetch('/toggle', { method: 'POST' })
+                .then(() => location.reload())
+                .catch(error => console.error('Error:', error));
+        }
+    </script>
+</head>
+<body>
+    <h1>HomePod Audio Toggle</h1>
+    <div class="status">Nuvarande utgång: <span>{{ current_output }}</span></div>
+    <button onclick="toggleAudio()">Växla ljudutgång</button>
+</body>
+</html>
