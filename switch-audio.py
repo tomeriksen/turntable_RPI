@@ -1,6 +1,5 @@
 from dataclasses import dataclass
 import os
-
 @dataclass
 class Sink:
     id: int
@@ -11,10 +10,9 @@ class SinkList:
     def __init__(self):
         sinkArray = []
         selected = -1
-    
     def find_by_name(self, sink_name):
         for sink in self.sinkArray:
-            if sink.name == sink_name:
+           if sink.name == sink_name:
                 return sink
         return None
     def find_by_id (self, sink_id):
