@@ -24,10 +24,23 @@ import time
 import signal
 from dataclasses import dataclass
 
+LOG_FILE = "/tmp/audio-router.log"
+
+def log_message(message):
+    with open(LOG_FILE, "a") as f:
+        f.write(f"{message}\n")
+    print(message)  # Also print to system logs for debugging
+
+log_message ("Start audio-router" + str (time.time()))
+
 class Loopback:
     def __init__(self, source, sink):
-        result = subprocess.run ("pactl", "load-module", "module-loopback", "source=" + source, "sink=" + sink, shell=True)
-        self.id = result.stdout.split()[0]
+        result = subprocess.run(
+            ["pactl", "load-module", "module-loopback", f"source={source.id}", f"sink={sink.id}"],
+            capture_output=True, text=True, check=False)
+
+        result = result.stdout.split()
+        self.id = result[0]
         self.source = source
         self.sink = sink
     
@@ -41,9 +54,19 @@ class Loopback:
             node_ids = []
             for node in nodes:
                 if "info" in node and "props" in node["info"]:
-                    if node["info"]["props"].get("pulse.module.id") == self.id:
-                        node_ids.append(node["id"])
-        
+                    props = node["info"]["props"]
+                    module_id = props.get("pulse.module.id")
+
+                    # Only print nodes that contain module ID
+                    if module_id is not None:
+                        print(f"Node ID: {node['id']}, Module ID: {module_id}")
+                        node_ids.append(node['id'])
+
+                if "info" in node and "props" in node["info"]:
+                    
+                    module_id = node["info"]["props"].get("pulse.module.id")
+                   
+                   
         
 
             return node_ids
@@ -59,7 +82,7 @@ class Loopback:
         # delete the pw loopback modules
         node_ids = self.get_pipewire_ids()
         for node_id in node_ids:
-            subprocess.run(["pw-unload", node_id], check=True)
+            subprocess.run(["pw-cli", "destroy", str(node_id)], check=True)
         
     def __enter__(self):
         #return self to be used within the with block
@@ -101,7 +124,7 @@ class Nodes:
         return None
     
     def append(self, node):
-        self.sink_array.append(node)
+        self.node_array.append(node)
     
     def remove(self, node_id):
         for node in self.node_array:
@@ -115,6 +138,8 @@ class Nodes:
     
     def __len__(self):
         return len(self.node_array)
+    def __getitem__(self,i):
+        return self.node_array[i]
 
 
 
@@ -142,47 +167,66 @@ class AudioRouter:
 
 
     def get_raop_sinks(self):
-        sinks = Nodes()
-        result = subprocess.run(["pactl", "list", "sinks", "short", "|", "grep", "raop"], capture_output=True, text=True, check=True)
-        for line in result.stdout:
-            id = line.split()[0]
-            name = line.split()[1]
-            airplay = True
-            sinks.append(Sink(id, name, airplay))
-        return sinks
+        try:
+            result = subprocess.run(["pactl", "list", "sinks", "short"], capture_output=True, text=True, check=True)
+
+            sinks = Nodes()
+            for line in result.stdout.split("\n"):  # Split into lines
+                if "raop" in line:  # Filter for RAOP sinks
+                    parts = line.split()  # Split by whitespace
+                    if len(parts) > 1:  # Ensure we have enough data
+                        id = parts[0]  # First column (sink ID)
+                        name = parts[1]  # Second column (sink name)
+                        sinks.append(Sink(int(id), name, airplay=True))  # Create Sink object
+            
+            return sinks
+        except subprocess.CalledProcessError as e:
+            print(f"Error running pactl: {e}")
+            return []
     
     def get_next_sink_id(self):
-        # Om det inte finns några RAOP-sinkar, returnera None
-        if not self.all_sinks:
+        """Returns the ID of the next available RAOP sink, cycling through them."""
+        if not self.all_sinks:  # If no sinks exist, return None
             return None
-        # Hitta vilken sink som används i den senaste loopbacken
-        last_sink_id = self.loopbacks[-1].sink if self.loopbacks else 0  # Använd 0 om ingen loopback finns
-        # Leta upp indexet för den aktuella sinken i listan
-        current_index = 0
-        for i, sink in enumerate(self.all_sinks):
-            if sink.id == last_sink_id:
-                current_index = i
-                break  # Stoppa loopen när vi hittar aktuell sink
-        # Räkna ut nästa sink genom att gå till nästa index i listan (cirkulär rotation)
-        next_index = (current_index + 1) % len(self.all_sinks)
-        return self.all_sinks[next_index].id
+
+        # If no loopback exists, return the first sink
+        if not self.loopbacks:
+            return self.all_sinks[0].id
+
+        # Get the last used sink ID from the latest loopback
+        last_sink_id = self.loopbacks[-1].sink.id
+
+        # Get all sink IDs as a list
+        sink_ids = [sink.id for sink in self.all_sinks]
+
+        # Find index of the last used sink (default to -1 if not found)
+        try:
+            last_index = sink_ids.index(last_sink_id)
+        except ValueError:
+            last_index = -1  # If sink is missing, start from the first one
+
+        # Get the next sink in a circular manner
+        next_index = (last_index + 1) % len(sink_ids)
+        return sink_ids[next_index]
+
 
     
     def get_all_sources(self):
         result = subprocess.run(["pactl", "list", "sources", "short"], capture_output=True, text=True, check=True)
+        result = result.stdout.strip()
         sources = Nodes()
-        for line in result.stdout:
+        for line in result.split("\n"):
             id = line.split()[0]
             name = line.split()[1]
             if "raop" in name: #skip raop sources
                 continue
-            sources.append(Node(id, name))
+            sources.append(Node(int(id), name))
         return sources
     
         
     
     def switch_audio(self, sink_id):
-        new_sink = self.all_sinks.get_sink_by_id(sink_id)
+        new_sink = self.all_sinks.get_node_by_id(sink_id)
         if not new_sink:
             print(f"Sink {sink_id} not found")
             return
@@ -192,7 +236,7 @@ class AudioRouter:
         self.loopbacks.append(loopback)
 
     def more_audio(self, sink_id):
-        new_sink = self.all_sinks.get_sink_by_id(sink_id)
+        new_sink = self.all_sinks.get_node_by_id(sink_id)
         if not new_sink:
             print(f"Sink {sink_id} not found")
             return
@@ -214,9 +258,26 @@ class AudioRouter:
     
     def handle_signal(self, sig, frame):
         """Hanterar inkommande signaler och utför åtgärder"""
-        if sig == signal.SIGUSR1:
+        
+        """if sig == signal.SIGUSR1:
             print("Mottog SIGUSR1 - Växlar ljudutgång")
-            self.switch_audio(self.get_next_sink_id())
+            self.switch_audio(self.get_next_sink_id())"""
+        if sig == signal.SIGUSR1:
+            log_message("Handling SIGUSR1: Switching RAOP sink")
+
+            # Debugging: Log all available sinks before switching
+            all_sinks = router.get_raop_sinks()
+            log_message(f"Available sinks: {[sink.id for sink in all_sinks]}")
+
+            next_sink_id = router.get_next_sink_id()
+            log_message(f"Next sink ID to switch to: {next_sink_id}")
+
+            if next_sink_id is None:
+                log_message("ERROR: No valid sink found! Check pactl output.")
+                return
+
+            router.switch_audio(next_sink_id)
+            log_message(f"Switched audio to sink {next_sink_id}")
         elif sig == signal.SIGUSR2:
             print("Mottog SIGUSR2 - Stänger av alla loopback")
             if self.loopbacks:
@@ -229,53 +290,113 @@ class AudioRouter:
 
     
     def monitor(self):
+        def parse_pactl_module_output(output):
+            #Parses pactl module output into a structured list of dictionaries.
+            modules = []
+            current_module = {}
+
+            for line in output.split("\n"):
+                line = line.strip()
+                if not line:
+                    continue  # Skip empty lines
+
+                if line.startswith("Module #"):
+                    if current_module:  # Save the previous module
+                        modules.append(current_module)
+                    current_module = {"Properties": {}}
+                    current_module["ID"] = line.split("#")[1].strip()
+                elif line.startswith("Name:"):
+                    current_module["Name"] = line.split(":", 1)[1].strip()
+                elif line.startswith("Argument:"):
+                    current_module["Arguments"] = line.split(":", 1)[1].strip()
+                elif line.startswith("Usage counter:"):
+                    current_module["Usage Counter"] = line.split(":", 1)[1].strip()
+                elif "=" in line:
+                    key, value = line.split("=", 1)
+                    current_module["Properties"][key.strip()] = value.strip().strip('"')
+
+            if current_module:
+                modules.append(current_module)  # Add last module
+
+            return modules
+        
         while True:
             #Check if all sinks are still available
             new_sinks = self.get_raop_sinks()
             for sink in self.all_sinks:
-                if not self.all_sinks.get_sink_by_id(sink.id):
+                if not self.all_sinks.get_node_by_id(sink.id):
                     self.kill_all_audio()
                     reload_module_raop_discover()
                     self.all_sinks = new_sinks
                     break
+            """
             #check if sinks are RUNNING
             result = subprocess.run(["pactl", "list", "modules"], capture_output=True, text=True, check=True)
-            modules = json.loads(result.stdout)
+            result = result.stdout
+            if not result:
+                time.sleep(10)
+                continue
+            modules = parse_pactl_module_output(result)
+            result_sinks = subprocess.run(["pactl", "list", "sinks", "short"], capture_output=True, text=True, check=True)
+            result_sinks.stdout.strip()
             for loopback in self.loopbacks:
                 for module in modules:
                     if "Arguments" in module:
-                        if "sink="&loopback.sink in module["Arguments"]:
+                        if "sink="+loopback.sink.id in module["Arguments"]:
                             #check if module is running
                             try:
-                                result = subprocess.run(["pactl", "list", "sinks", "short", "|", "grep", loopback.sink], capture_output=True, text=True, check=True)
-                                if not result.stdout.strip():
-                                    print(f"Sink {loopback.sink} not found")
+                                found_loopback = False
+                                for line in result_sinks.stdout.split("\n"):
+                                    if loopback.sink in line:
+                                        found_loopback = True
+                                        if "RUNNING" not in line:
+                                            print(f"Sink {loopback.sink} not running")
+                                            raise Exception
+                                        else:
+                                            break
+                                if not found_loopback:
+                                    print(f"Loopback for sink {loopback.sink} not found")
                                     raise Exception
-                                if "RUNNING" not in result.stdout:
-                                    print(f"Sink {loopback.sink} not running")
-                                    raise Exception
+                                   
                             except:
                                 self.kill_audio(loopback.sink)
                                 print(f"Loopback for sink {loopback.sink} not running")
                                 break
                                 print(f"Killing audio to sink {loopback.sink}")
 
+            """
 
 
 
-
-            signal.pause(10)
+            time.sleep(10)
+    def run(self):
+        self.monitor()
          
 def reload_module_raop_discover():
     #unload module
-    with self.lock:
+    with signal.lock:
         print("Restarting module-raop-discover...")
         os.system("pactl unload-module module-raop-discover")
         os.system("sleep 2")
         os.system("pactl load-module module-raop-discover")
         print("RAOP discover restarted.")
+# Wait for pactl to be ready
+def wait_for_pactl():
+    retries = 10
+    for i in range(retries):
+        try:
+            subprocess.run(["pactl", "list", "sources", "short"], check=True, capture_output=True, text=True)
+            print("pactl is ready")
+            return
+        except subprocess.CalledProcessError:
+            print(f"pactl not ready, retrying... ({i+1}/{retries})")
+            time.sleep(2)
+    print("pactl failed to start after retries. Exiting.")
+    exit(1)
 
 
-
-router = AudioRouter()
-router.monitor()
+if __name__ == "__main__":
+    wait_for_pactl()
+    router = AudioRouter()
+    print("PID:", os.getpid())
+    router.run()
