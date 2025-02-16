@@ -21,7 +21,9 @@ import os
 import json
 import subprocess
 import time
+import copy
 import signal
+import threading
 from dataclasses import dataclass
 
 LOG_FILE = "/tmp/audio-router.log"
@@ -143,6 +145,10 @@ class Nodes:
 
 
 
+#########################################
+###########AudioRouter Class ############
+#########################################
+    
 class AudioRouter:
 
     def __init__(self):
@@ -178,7 +184,7 @@ class AudioRouter:
                         id = parts[0]  # First column (sink ID)
                         name = parts[1]  # Second column (sink name)
                         sinks.append(Sink(int(id), name, airplay=True))  # Create Sink object
-            
+                        #log_message ("Adding sink: " + name)
             return sinks
         except subprocess.CalledProcessError as e:
             print(f"Error running pactl: {e}")
@@ -186,24 +192,29 @@ class AudioRouter:
     
     def get_next_sink_id(self):
         """Returns the ID of the next available RAOP sink, cycling through them."""
+        #refresh sinks
+        self.all_sinks = self.get_raop_sinks()
+        
         if not self.all_sinks:  # If no sinks exist, return None
             return None
 
         # If no loopback exists, return the first sink
         if not self.loopbacks:
             return self.all_sinks[0].id
+        
+        #id might have changed, fetch name of sink in loopback
+        last_sink_name = self.loopbacks[-1].sink.name
 
-        # Get the last used sink ID from the latest loopback
-        last_sink_id = self.loopbacks[-1].sink.id
-
-        # Get all sink IDs as a list
-        sink_ids = [sink.id for sink in self.all_sinks]
+        # Get all sink IDs and names as a list
+        sink_ids , sink_names = zip(*[(sink.id, sink.name) for sink in self.all_sinks])
+        
 
         # Find index of the last used sink (default to -1 if not found)
         try:
-            last_index = sink_ids.index(last_sink_id)
+            last_index = sink_names.index(last_sink_name)
         except ValueError:
             last_index = -1  # If sink is missing, start from the first one
+     
 
         # Get the next sink in a circular manner
         next_index = (last_index + 1) % len(sink_ids)
@@ -321,13 +332,25 @@ class AudioRouter:
             return modules
         
         while True:
+            time.sleep(10)
             #Check if all sinks are still available
+            print ("hello")
             new_sinks = self.get_raop_sinks()
             for sink in self.all_sinks:
-                if not self.all_sinks.get_node_by_id(sink.id):
+                if not new_sinks.get_node_by_id(sink.id):
+                    #sink does not exist anymore
+                    print(f"VARNING: Sink {sink.name} (ID {sink.id}) försvunnen! Laddar om RAOP.")
+
+                    old_loopbacks = copy.deepcopy(self.loopbacks)
                     self.kill_all_audio()
                     reload_module_raop_discover()
-                    self.all_sinks = new_sinks
+                    self.all_sinks = self.get_raop_sinks() #sinks may have changed after reload
+                    #try to reestablish loopbacks
+                    for old_loopback in old_loopbacks:
+                        new_sink = self.all_sinks.get_node_by_name(old_loopback.sink.name)
+                        if new_sink:
+                            loopback = Loopback(old_loopback.source, new_sink)
+                            self.loopbacks.append(loopback)
                     break
             """
             #check if sinks are RUNNING
@@ -368,18 +391,23 @@ class AudioRouter:
 
 
 
-            time.sleep(10)
+            
     def run(self):
         self.monitor()
          
+
+
+RELOAD_LOCK = threading.Lock()  # Create a lock object
+
 def reload_module_raop_discover():
-    #unload module
-    with signal.lock:
+    """Safely reloads module-raop-discover"""
+    with RELOAD_LOCK:  # Correct way to use a lock
         print("Restarting module-raop-discover...")
         os.system("pactl unload-module module-raop-discover")
-        os.system("sleep 2")
+        time.sleep(2)  # Avoid race conditions
         os.system("pactl load-module module-raop-discover")
         print("RAOP discover restarted.")
+
 # Wait for pactl to be ready
 def wait_for_pactl():
     retries = 10
