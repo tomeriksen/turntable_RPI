@@ -1,21 +1,21 @@
 
-# switch_audio - switchar sink från CURRENT_SINKS[0] till sink
-#more_audio - öppnar en ny sink och lägger till den till CURRENT_SINKS
-#kill_audio - tar bort en sink från CURRENT_SINKS och stänger loopbacken
-#kill_all_audio - stänger alla sinks och loopbackar
+# switch_audio - switchar sink frÃ¥n CURRENT_SINKS[0] till sink
+#more_audio - Ã¶ppnar en ny sink och lÃ¤gger till den till CURRENT_SINKS
+#kill_audio - tar bort en sink frÃ¥n CURRENT_SINKS och stÃ¤nger loopbacken
+#kill_all_audio - stÃ¤nger alla sinks och loopbackar
 # monitor - kollar att alla sparade sinks finns i systemet. Laddar om module-raop-discover
-# signal funktion som lyssnar efter signaler från andra program. 
+# signal funktion som lyssnar efter signaler frÃ¥n andra program. 
 
 
 #SUPPORTFUNKTIONER
-#KLASSER
+#KLASSER 
 # Loopback - klass som hanterar loopbackar. Brygga mellan pulseaudio och pipewire
 # Nodes - klass som hanterar sources / sinks 
 # Sinklist - klass som hanterar en lista av sinks.
-# Sink - klass som hanterar sinks. Ärver från Node.
-# Source - klass som hanterar sources. Ärver från Node.
+# Sink - klass som hanterar sinks. Ãrver frÃ¥n Node.
+# Source - klass som hanterar sources. Ãrver frÃ¥n Node.
 # Node - klass som hanterar en nod.
-# AudioRouter - huvudklass som hanterar ljudväxlingar.
+# AudioRouter - huvudklass som hanterar ljudvÃ¤xlingar.
 
 import os
 import json
@@ -35,6 +35,24 @@ def log_message(message):
 
 log_message ("Start audio-router" + str (time.time()))
 
+STATUS_FILE = "/tmp/audio-router-status.log"
+def write_status(message):
+    """Skriver status om senaste Ã¥tgÃ¤rden"""
+    with open(STATUS_FILE, "w") as f:
+        f.write(message + "\n")
+    log_message(f"STATUS: {message}")
+    
+COMMAND_FILE = "/tmp/audio-router-command"
+def read_command():
+    try:
+        with open(COMMAND_FILE, "r") as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        log_message ("No command sent")
+        return None
+
+
+
 class Loopback:
     def __init__(self, source, sink):
         result = subprocess.run(
@@ -48,11 +66,11 @@ class Loopback:
     
     def get_pipewire_ids(self):
         try:
-            # Kör pw-dump och ladda JSON-utdata
+            # KÃ¶r pw-dump och ladda JSON-utdata
             result = subprocess.run(["pw-dump"], capture_output=True, text=True, check=True)
             nodes = json.loads(result.stdout)
 
-            # Filtrera noder som har rätt PulseAudio-modul-ID
+            # Filtrera noder som har rÃ¤tt PulseAudio-modul-ID
             node_ids = []
             for node in nodes:
                 if "info" in node and "props" in node["info"]:
@@ -74,7 +92,7 @@ class Loopback:
             return node_ids
         
         except subprocess.CalledProcessError as e:
-            print(f"Fel vid körning av pw-dump: {e}")
+            print(f"Fel vid kÃ¶rning av pw-dump: {e}")
             return []
         except json.JSONDecodeError as e:
             print(f"Fel vid tolkning av JSON: {e}")
@@ -125,6 +143,12 @@ class Nodes:
                 return node
         return None
     
+    def get_index_by_name(self, node_name):
+        for i in range(len(self.node_array)):
+            if self.node_array[i].name == node_name:
+                return i
+        return -1 
+    
     def append(self, node):
         self.node_array.append(node)
     
@@ -152,43 +176,60 @@ class Nodes:
 class AudioRouter:
 
     def __init__(self):
-        self.all_sinks = self.get_raop_sinks()
-        self.all_sources = self.get_all_sources()
+        restart_audio_server = not raop_module_loaded()
+        if restart_audio_server:
+            restart_pulseaudio()
+        
+        self.all_sinks = self.get_raop_sinks(restart_audio_server)
+        self.all_sources = self.get_all_sources(restart_audio_server)
         
         try:
             self.current_source = self.all_sources.get_node_by_name("alsa_input.platform-soc_sound.stereo-fallback")
-        except AttributeError:
+            if not self.current_source:
+                raise Exception
+        except:
             self.current_source = None
-            print("No input source found")
+            print("FATAL: No input source found")
         self.loopbacks = []
         #remove all loopbacks currently running in the system
         
+                
+                
 
         # Koppla signaler
-        signal.signal(signal.SIGUSR1, self.handle_signal) # Hoppa till nästa sink
-        signal.signal(signal.SIGUSR2, self.handle_signal) # Stäng av alla loopbackar
+        signal.signal(signal.SIGUSR1, self.handle_signal) # Hoppa till nÃ¤sta sink
+        signal.signal(signal.SIGUSR2, self.handle_signal) # StÃ¤ng av alla loopbackar
         signal.signal(signal.SIGHUP, self.handle_signal) # starta om raop discover
-        signal.signal(signal.SIGTERM, self.handle_signal) # Stäng av alla loopbackar
+        signal.signal(signal.SIGTERM, self.handle_signal) # StÃ¤ng av alla loopbackar
         signal.signal(signal.SIGINT, self.handle_signal)
 
 
-    def get_raop_sinks(self):
-        try:
-            result = subprocess.run(["pactl", "list", "sinks", "short"], capture_output=True, text=True, check=True)
+    def get_raop_sinks(self, wait_after_restart = False):
+        timeout = 1
+        sinks = Nodes()
+        if wait_after_restart:
+            timeout = 10
+        for i in range(timeout):
+            try:
+                result = subprocess.run(["pactl", "list", "sinks", "short"], capture_output=True, text=True, check=True)
 
-            sinks = Nodes()
-            for line in result.stdout.split("\n"):  # Split into lines
-                if "raop" in line:  # Filter for RAOP sinks
-                    parts = line.split()  # Split by whitespace
-                    if len(parts) > 1:  # Ensure we have enough data
-                        id = parts[0]  # First column (sink ID)
-                        name = parts[1]  # Second column (sink name)
-                        sinks.append(Sink(int(id), name, airplay=True))  # Create Sink object
-                        #log_message ("Adding sink: " + name)
-            return sinks
-        except subprocess.CalledProcessError as e:
-            print(f"Error running pactl: {e}")
-            return []
+                for line in result.stdout.split("\n"):  # Split into lines
+                    if "raop" in line:  # Filter for RAOP sinks
+                        parts = line.split()  # Split by whitespace
+                        if len(parts) > 1:  # Ensure we have enough data
+                            id = parts[0]  # First column (sink ID)
+                            name = parts[1]  # Second column (sink name)
+                            sinks.append(Sink(int(id), name, airplay=True))  # Create Sink object
+                            #log_message ("Adding sink: " + name)
+                if len(sinks):
+                    break
+                else:
+                    log_message(f"Waiting for sinks... ({i+1}/{timeout})")
+            except subprocess.CalledProcessError as e:
+                print(f"Error running pactl: {e}")
+                return []
+            time.sleep(1)
+        return sinks
     
     def get_next_sink_id(self):
         """Returns the ID of the next available RAOP sink, cycling through them."""
@@ -219,44 +260,96 @@ class AudioRouter:
         # Get the next sink in a circular manner
         next_index = (last_index + 1) % len(sink_ids)
         return sink_ids[next_index]
+    def get_next_sink_name(self):
+        """Returns the ID of the next available RAOP sink, cycling through them."""
+        #refresh sinks
+        self.all_sinks = self.get_raop_sinks()
+        
+        if not self.all_sinks:  # If no sinks exist, return None
+            return None
 
+        # If no loopback exists, return the first sink
+        if not self.loopbacks:
+            return self.all_sinks[0].name
+        
+        #id might have changed, fetch name of sink in loopback
+        last_sink_name = self.loopbacks[-1].sink.name
 
+        # Find index of the last used sink (default to -1 if not found)
+        last_index =  self.all_sinks.get_index_by_name(last_sink_name)
+
+        # Get the next sink in a circular manner
+        next_index = (last_index + 1) % len(self.all_sinks)
+        return self.all_sinks[next_index].name
     
-    def get_all_sources(self):
-        result = subprocess.run(["pactl", "list", "sources", "short"], capture_output=True, text=True, check=True)
-        result = result.stdout.strip()
-        sources = Nodes()
-        for line in result.split("\n"):
-            id = line.split()[0]
-            name = line.split()[1]
-            if "raop" in name: #skip raop sources
-                continue
-            sources.append(Node(int(id), name))
-        return sources
-    
+    def get_prev_sink_name(self):
+        """Returns the ID of the next available RAOP sink, cycling through them."""
+        #refresh sinks
+        self.all_sinks = self.get_raop_sinks()
+        
+        if not self.all_sinks:  # If no sinks exist, return None
+            return None
+
+        # If no loopback exists, return the first sink
+        if not self.loopbacks:
+            return self.all_sinks[0].name
+        
+        #id might have changed, fetch name of sink in loopback
+        last_sink_name = self.loopbacks[-1].sink.name
+
+        # Find index of the last used sink (default to -1 if not found)
+        last_index =  self.all_sinks.get_index_by_name(last_sink_name)
+
+        # Get the next sink in a circular manner
+        next_index = (last_index - 1) % len(self.all_sinks)
+        return self.all_sinks[next_index].name
+
+   
+    def get_all_sources(self, wait_after_restart = False):
+        timeout = 1
+        if wait_after_restart:
+            timeout = 10
+        for i in range(timeout):
+            
+            result = subprocess.run(["pactl", "list", "sources", "short"], capture_output=True, text=True, check=True)
+            result = result.stdout.strip()
+            sources = Nodes()
+            for line in result.split("\n"):
+                id = line.split()[0]
+                name = line.split()[1]
+                if "raop" in name: #skip raop sources
+                    continue
+                sources.append(Node(int(id), name))
+            if len(sources):
+                return sources
+            else:
+                log_message(f"Waiting for sources... ({i+1}/{timeout})")
+                time.sleep(1)
+        log_message("ERROR: No valid sources found after waiting. Check PipeWire/PulseAudio!")
+
         
     
-    def switch_audio(self, sink_id):
-        new_sink = self.all_sinks.get_node_by_id(sink_id)
+    def switch_audio(self, sink_name):
+        new_sink = self.all_sinks.get_node_by_name(sink_name)
         if not new_sink:
-            print(f"Sink {sink_id} not found")
+            print(f"Sink {sink_name} not found")
             return
         self.kill_all_audio()
         #create new loopback
         loopback = Loopback(self.current_source, new_sink)
         self.loopbacks.append(loopback)
 
-    def more_audio(self, sink_id):
-        new_sink = self.all_sinks.get_node_by_id(sink_id)
+    def more_audio(self, sink_name):
+        new_sink = self.all_sinks.get_node_by_name(sink_name)
         if not new_sink:
-            print(f"Sink {sink_id} not found")
+            print(f"Sink {sink_name} not found")
             return
         loopback = Loopback(self.current_source, new_sink)
         self.loopbacks.append(loopback)
     
-    def kill_audio(self, sink_id):
+    def kill_audio(self, sink_name):
         for loopback in self.loopbacks:
-            if loopback.sink == sink_id:
+            if loopback.sink.name == sink_name:
                 loopback.remove()
                 self.loopbacks.remove(loopback)
                 return
@@ -267,12 +360,9 @@ class AudioRouter:
             loopback.remove()
         self.loopbacks = []
     
-    def handle_signal(self, sig, frame):
-        """Hanterar inkommande signaler och utför åtgärder"""
+    """ def handle_signal(self, sig, frame):
+        #Hanterar inkommande signaler och utfÃ¶r Ã¥tgÃ¤rder
         
-        """if sig == signal.SIGUSR1:
-            print("Mottog SIGUSR1 - Växlar ljudutgång")
-            self.switch_audio(self.get_next_sink_id())"""
         if sig == signal.SIGUSR1:
             log_message("Handling SIGUSR1: Switching RAOP sink")
 
@@ -280,21 +370,63 @@ class AudioRouter:
             all_sinks = router.get_raop_sinks()
             log_message(f"Available sinks: {[sink.id for sink in all_sinks]}")
 
-            next_sink_id = router.get_next_sink_id()
-            log_message(f"Next sink ID to switch to: {next_sink_id}")
+            next_sink_name = router.get_next_sink_name()
+            log_message(f"Next sink ID to switch to: {next_sink_name}")
 
-            if next_sink_id is None:
+            if next_sink_name is None:
                 log_message("ERROR: No valid sink found! Check pactl output.")
                 return
 
-            router.switch_audio(next_sink_id)
-            log_message(f"Switched audio to sink {next_sink_id}")
+            router.switch_audio(next_sink_name)
+            log_message(f"Switched audio to sink {next_sink_name}")
         elif sig == signal.SIGUSR2:
-            print("Mottog SIGUSR2 - Stänger av alla loopback")
+            print("Mottog SIGUSR2 - StÃ¤nger av alla loopback")
             if self.loopbacks:
                 self.kill_all_audio()
         elif sig == signal.SIGTERM or sig == signal.SIGINT:
-            print("Mottog SIGTERM/SIGINT - Stänger ner allt ljud")
+            print("Mottog SIGTERM/SIGINT - StÃ¤nger ner allt ljud")
+            self.kill_all_audio()
+            exit(0)
+            """
+    def handle_signal(self, sig, frame):
+        #Hanterar inkommande signaler fÃ¶r att styra ljudvÃ¤xlingen
+        
+        # LÃ¤s kommando frÃ¥n filen
+        command = read_command()
+
+        log_message(f"Received signal: {sig} with command: {command}")
+
+        if sig == signal.SIGUSR1:
+            if command == "mute":
+                log_message("Muting audio")
+                subprocess.run(["pactl", "set-sink-mute", "@DEFAULT_SINK@", "toggle"])
+                write_status("SUCCESS: muted")
+            
+            elif command == "next":
+                next_sink_name = self.get_next_sink_name()
+                if next_sink_name:
+                    self.switch_audio(next_sink_name)
+                    write_status(f"SUCCESS: Switched to {next_sink_name}")
+                else:
+                    write_status("ERROR: No valid sink found!")
+            
+            elif command == "prev":
+                prev_sink_name = self.get_prev_sink_name()
+                if prev_sink_name:
+                    self.switch_audio(prev_sink_name)
+                    write_status(f"SUCCESS: Switched to {prev_sink_name}")
+                else:
+                    write_status("ERROR: No valid sink found!")
+
+            else:
+                write_status(f"ERROR: Unknown command '{command}'")
+        
+        elif sig == signal.SIGUSR2:
+            log_message("Reloading PulseAudio")
+            restart_pulseaudio()
+            write_status("PulseAudio restarted")
+        elif sig == signal.SIGTERM or sig == signal.SIGINT:
+            print("Mottog SIGTERM/SIGINT - StÃ¤nger ner allt ljud")
             self.kill_all_audio()
             exit(0)
 
@@ -339,11 +471,12 @@ class AudioRouter:
             for sink in self.all_sinks:
                 if not new_sinks.get_node_by_id(sink.id):
                     #sink does not exist anymore
-                    print(f"VARNING: Sink {sink.name} (ID {sink.id}) försvunnen! Laddar om RAOP.")
+                    print(f"VARNING: Sink {sink.name} (ID {sink.id}) fÃ¶rsvunnen! Laddar om RAOP.")
 
                     old_loopbacks = copy.deepcopy(self.loopbacks)
                     self.kill_all_audio()
-                    reload_module_raop_discover()
+                    restart_pulseaudio()
+                    #reload_module_raop_discover()
                     self.all_sinks = self.get_raop_sinks() #sinks may have changed after reload
                     #try to reestablish loopbacks
                     for old_loopback in old_loopbacks:
@@ -398,16 +531,43 @@ class AudioRouter:
 
 
 RELOAD_LOCK = threading.Lock()  # Create a lock object
+RESTART_LOCK = threading.Lock()  # Create a lock object
 
-def reload_module_raop_discover():
+def reload_module_raop_discover(unload_first= True):
     """Safely reloads module-raop-discover"""
     with RELOAD_LOCK:  # Correct way to use a lock
         print("Restarting module-raop-discover...")
-        os.system("pactl unload-module module-raop-discover")
-        time.sleep(2)  # Avoid race conditions
+        if unload_first:
+            os.system("pactl unload-module module-raop-discover")
+            time.sleep(2)  # Avoid race conditions
         os.system("pactl load-module module-raop-discover")
         print("RAOP discover restarted.")
 
+def raop_module_loaded ():
+    raop_loaded = False
+    result = subprocess.run(["pactl", "list", "modules", "short"],capture_output=True, text=True, check=True)
+    for line in result.stdout.split("\n"):  # Split into lines
+        if "module-raop-discover" in line:
+            raop_loaded = True
+            log_message ("Raop module is loaded")
+            break
+    #load raop module
+    if not raop_loaded:
+        log_message ("Raop module is not loaded")
+    return raop_loaded
+
+def restart_pulseaudio ():
+    try:
+        with RELOAD_LOCK:
+            log_message("Restarting Pulse Audio and Pipewire")
+            subprocess.run (["systemctl" ,"--user", "restart",  "pipewire", "pipewire-pulse"])
+    except subprocess.CalledProcessError:
+        log_message ("Failed to restart Pipewire and PulseAudio")
+    if not raop_module_loaded():
+        reload_module_raop_discover(unload_first=False)
+        
+    
+    
 # Wait for pactl to be ready
 def wait_for_pactl():
     retries = 10
@@ -423,8 +583,11 @@ def wait_for_pactl():
     exit(1)
 
 
+
 if __name__ == "__main__":
     wait_for_pactl()
     router = AudioRouter()
     print("PID:", os.getpid())
     router.run()
+
+
