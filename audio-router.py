@@ -37,7 +37,7 @@ log_message ("Start audio-router" + str (time.time()))
 
 STATUS_FILE = "/tmp/audio-router-status.log"
 def write_status(message):
-    """Skriver status om senaste Ã¥tgÃ¤rden"""
+    """Skriver status om senaste åtgärden"""
     with open(STATUS_FILE, "w") as f:
         f.write(message + "\n")
     log_message(f"STATUS: {message}")
@@ -79,8 +79,9 @@ class Loopback:
 
                     # Only print nodes that contain module ID
                     if module_id is not None:
-                        print(f"Node ID: {node['id']}, Module ID: {module_id}")
-                        node_ids.append(node['id'])
+                        if int(module_id) == int(self.id):
+                            print(f"Node ID: {node['id']}, Module ID: {module_id}")
+                            node_ids.append(node['id'])
 
                 if "info" in node and "props" in node["info"]:
                     
@@ -90,6 +91,7 @@ class Loopback:
         
 
             return node_ids
+        
         
         except subprocess.CalledProcessError as e:
             print(f"Fel vid kÃ¶rning av pw-dump: {e}")
@@ -147,7 +149,13 @@ class Nodes:
         for i in range(len(self.node_array)):
             if self.node_array[i].name == node_name:
                 return i
-        return -1 
+        return -1
+    
+    def is_node_name (self, pattern):
+        for node in self.node_array:
+            if pattern.lower() in node.name.lower():
+                return node
+        return None
     
     def append(self, node):
         self.node_array.append(node)
@@ -260,6 +268,7 @@ class AudioRouter:
         # Get the next sink in a circular manner
         next_index = (last_index + 1) % len(sink_ids)
         return sink_ids[next_index]
+    
     def get_next_sink_name(self):
         """Returns the ID of the next available RAOP sink, cycling through them."""
         #refresh sinks
@@ -326,7 +335,12 @@ class AudioRouter:
                 log_message(f"Waiting for sources... ({i+1}/{timeout})")
                 time.sleep(1)
         log_message("ERROR: No valid sources found after waiting. Check PipeWire/PulseAudio!")
-
+    
+    def sink_in_loopbacks(self, sink_name):
+        for loopback in self.loopbacks:
+            if loopback.sink.name == sink_name:
+                return True
+        return False
         
     
     def switch_audio(self, sink_name):
@@ -344,14 +358,18 @@ class AudioRouter:
         if not new_sink:
             print(f"Sink {sink_name} not found")
             return
-        loopback = Loopback(self.current_source, new_sink)
-        self.loopbacks.append(loopback)
+        if self.sink_in_loopbacks(sink_name):
+            log_message (f"Tried to open already active sink {sink_name}")
+        else:
+            loopback = Loopback(self.current_source, new_sink)
+            self.loopbacks.append(loopback)
     
     def kill_audio(self, sink_name):
         for loopback in self.loopbacks:
             if loopback.sink.name == sink_name:
                 loopback.remove()
                 self.loopbacks.remove(loopback)
+                log_message (f"Remove sink {sink_name} from loopback")
                 return
         print(f"Loopback for sink {sink_id} not found")
     
@@ -417,9 +435,20 @@ class AudioRouter:
                     write_status(f"SUCCESS: Switched to {prev_sink_name}")
                 else:
                     write_status("ERROR: No valid sink found!")
-
+            
             else:
-                write_status(f"ERROR: Unknown command '{command}'")
+                #is it part of a sink name?
+                sink = self.all_sinks.is_node_name(command)
+                if sink:
+                    if self.sink_in_loopbacks(sink.name):
+                        self.kill_audio(sink.name)
+                        write_status(f"SUCCESS: Shut off {sink.name}")
+
+                    else:
+                        self.more_audio(sink.name)
+                        write_status(f"SUCCESS: Switched to {sink.name}")
+                else: 
+                    write_status(f"ERROR: Unknown command '{command}'")
         
         elif sig == signal.SIGUSR2:
             log_message("Reloading PulseAudio")
