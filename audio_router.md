@@ -118,17 +118,21 @@ def restart_pulseaudio():
 # 6. Starta som tjänst
 För att köra audio-router.py som en **systemd-tjänst** vid uppstart:
 📌 **Skapa service-fil:**
-`sudo nano /etc/systemd/system/audio-router.service`
+`sudo nano `~/.config/systemd/user/audio-router.service`
 📌 **Lägg till:**
 ```
 [Unit]
 Description=Audio Router Service
-After=network.target sound.target
+After=pipewire.service pipewire-pulse.service network-online.target
+Wants=network-online.target
 
 [Service]
+#Environment="XDG_RUNTIME_DIR=/run/user/1000"
+#Environment="PULSE_RUNTIME_PATH=/run/user/1000/pulse"
+ExecStartPre=/bin/sleep 5
 ExecStart=/usr/bin/python3 /home/tomeriksen/development/turntable-rpi/audio-router.py
 Restart=always
-User=tomeriksen
+
 
 [Install]
 WantedBy=default.target
