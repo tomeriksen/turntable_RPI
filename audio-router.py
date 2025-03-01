@@ -25,31 +25,7 @@ import copy
 import signal
 import threading
 from dataclasses import dataclass
-
-LOG_FILE = "/tmp/audio-router.log"
-
-def log_message(message):
-    with open(LOG_FILE, "a") as f:
-        f.write(f"{message}\n")
-    print(message)  # Also print to system logs for debugging
-
-log_message ("Start audio-router" + str (time.time()))
-
-STATUS_FILE = "/tmp/audio-router-status.log"
-def write_status(message):
-    """Skriver status om senaste åtgärden"""
-    with open(STATUS_FILE, "w") as f:
-        f.write(message + "\n")
-    log_message(f"STATUS: {message}")
-    
-COMMAND_FILE = "/tmp/audio-router-command"
-def read_command():
-    try:
-        with open(COMMAND_FILE, "r") as f:
-            return f.read().strip()
-    except FileNotFoundError:
-        log_message ("No command sent")
-        return None
+from flash_led import FlashLedManager
 
 
 
@@ -202,7 +178,8 @@ class AudioRouter:
         #remove all loopbacks currently running in the system
         
                 
-                
+        led_manager = FlashLedManager()
+        led_manager.flash_led_ok() 
 
         # Koppla signaler
         signal.signal(signal.SIGUSR1, self.handle_signal) # Hoppa till nÃ¤sta sink
@@ -210,6 +187,10 @@ class AudioRouter:
         signal.signal(signal.SIGHUP, self.handle_signal) # starta om raop discover
         signal.signal(signal.SIGTERM, self.handle_signal) # StÃ¤ng av alla loopbackar
         signal.signal(signal.SIGINT, self.handle_signal)
+
+    def __exit__(self):
+        self.kill_all_audio()
+        self.led_manager.remove_all_leds()
 
 
     def get_raop_sinks(self, wait_after_restart = False):
@@ -235,8 +216,10 @@ class AudioRouter:
                     log_message(f"Waiting for sinks... ({i+1}/{timeout})")
             except subprocess.CalledProcessError as e:
                 print(f"Error running pactl: {e}")
+                self.led_manager.flash_error()
                 return []
             time.sleep(1)
+        self.led_manager.flash_ok()
         return sinks
     
     def get_next_sink_id(self):
@@ -356,13 +339,16 @@ class AudioRouter:
     def more_audio(self, sink_name):
         new_sink = self.all_sinks.get_node_by_name(sink_name)
         if not new_sink:
-            print(f"Sink {sink_name} not found")
+            log_message(f"Sink {sink_name} not found")
+            self.led_manager.flash_error()
             return
         if self.sink_in_loopbacks(sink_name):
             log_message (f"Tried to open already active sink {sink_name}")
         else:
             loopback = Loopback(self.current_source, new_sink)
             self.loopbacks.append(loopback)
+            log_message (f"Opened sink between {self.current_source} and {sink_name}")
+            self.led_manager.flash_ok()
     
     def kill_audio(self, sink_name):
         for loopback in self.loopbacks:
@@ -371,41 +357,14 @@ class AudioRouter:
                 self.loopbacks.remove(loopback)
                 log_message (f"Remove sink {sink_name} from loopback")
                 return
-        print(f"Loopback for sink {sink_id} not found")
+        log_message(f"Loopback for sink {sink_name} not found")
     
     def kill_all_audio(self):
         for loopback in self.loopbacks:
             loopback.remove()
         self.loopbacks = []
     
-    """ def handle_signal(self, sig, frame):
-        #Hanterar inkommande signaler och utfÃ¶r Ã¥tgÃ¤rder
-        
-        if sig == signal.SIGUSR1:
-            log_message("Handling SIGUSR1: Switching RAOP sink")
-
-            # Debugging: Log all available sinks before switching
-            all_sinks = router.get_raop_sinks()
-            log_message(f"Available sinks: {[sink.id for sink in all_sinks]}")
-
-            next_sink_name = router.get_next_sink_name()
-            log_message(f"Next sink ID to switch to: {next_sink_name}")
-
-            if next_sink_name is None:
-                log_message("ERROR: No valid sink found! Check pactl output.")
-                return
-
-            router.switch_audio(next_sink_name)
-            log_message(f"Switched audio to sink {next_sink_name}")
-        elif sig == signal.SIGUSR2:
-            print("Mottog SIGUSR2 - StÃ¤nger av alla loopback")
-            if self.loopbacks:
-                self.kill_all_audio()
-        elif sig == signal.SIGTERM or sig == signal.SIGINT:
-            print("Mottog SIGTERM/SIGINT - StÃ¤nger ner allt ljud")
-            self.kill_all_audio()
-            exit(0)
-            """
+  
     def handle_signal(self, sig, frame):
         #Hanterar inkommande signaler fÃ¶r att styra ljudvÃ¤xlingen
         
@@ -447,8 +406,10 @@ class AudioRouter:
                     else:
                         self.more_audio(sink.name)
                         write_status(f"SUCCESS: Switched to {sink.name}")
+                    self.led_manager.flash_ok()
                 else: 
                     write_status(f"ERROR: Unknown command '{command}'")
+                    self.led_manager.flash_error()
         
         elif sig == signal.SIGUSR2:
             log_message("Reloading PulseAudio")
@@ -457,6 +418,7 @@ class AudioRouter:
         elif sig == signal.SIGTERM or sig == signal.SIGINT:
             print("Mottog SIGTERM/SIGINT - StÃ¤nger ner allt ljud")
             self.kill_all_audio()
+            
             exit(0)
 
 
@@ -610,6 +572,32 @@ def wait_for_pactl():
             time.sleep(2)
     print("pactl failed to start after retries. Exiting.")
     exit(1)
+
+
+LOG_FILE = "/tmp/audio-router.log"
+
+def log_message(message):
+    with open(LOG_FILE, "a") as f:
+        f.write(f"{message}\n")
+    print(message)  # Also print to system logs for debugging
+
+log_message ("Start audio-router" + str (time.time()))
+
+STATUS_FILE = "/tmp/audio-router-status.log"
+def write_status(message):
+    """Skriver status om senaste åtgärden"""
+    with open(STATUS_FILE, "w") as f:
+        f.write(message + "\n")
+    log_message(f"STATUS: {message}")
+    
+COMMAND_FILE = "/tmp/audio-router-command"
+def read_command():
+    try:
+        with open(COMMAND_FILE, "r") as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        log_message ("No command sent")
+        return None
 
 
 
