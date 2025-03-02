@@ -160,6 +160,9 @@ class Nodes:
 class AudioRouter:
 
     def __init__(self):
+        self.led_manager = FlashLedManager()
+        self.led_manager.flash_ok()
+        
         restart_audio_server = not raop_module_loaded()
         if restart_audio_server:
             restart_pulseaudio()
@@ -178,8 +181,7 @@ class AudioRouter:
         #remove all loopbacks currently running in the system
         
                 
-        led_manager = FlashLedManager()
-        led_manager.flash_led_ok() 
+        
 
         # Koppla signaler
         signal.signal(signal.SIGUSR1, self.handle_signal) # Hoppa till nÃ¤sta sink

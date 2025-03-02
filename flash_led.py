@@ -1,6 +1,8 @@
 import subprocess
 import time
 
+FLASH_LED_SCRIPT = "/usr/local/bin/flash_pisound_leds.sh"
+
 class FlashLedManager:
     def __init__(self):
         self.led_procs = []
@@ -9,13 +11,16 @@ class FlashLedManager:
         self.remove_all_leds()
     
     def remove_all_leds(self):
-        for led_proc in self.leds_procs:
+        for led_proc in self.led_procs:
             led_proc.terminate()
-        self.leds_procs = []
+        self.led_procs = []
     
     def flash_led(self, count=1):
-        cmd = f"source /usr/local/pisound/scripts/common/common.sh && flash_leds {count}"
-        subprocess.run(["bash", "-c", cmd], shell=True, check=True)
+        cmd =  f"{FLASH_LED_SCRIPT} {count}"
+        try:
+            subprocess.run(cmd, shell=True, check=True, timeout = 2)
+        except subprocess.TimeoutExpired:
+            print("Timeout: flash_leds hängde sig!")
 
     def flash_error(self):
         self.remove_all_leds()
