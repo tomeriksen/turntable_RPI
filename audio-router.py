@@ -462,12 +462,12 @@ class AudioRouter:
         while True:
             time.sleep(10)
             #Check if all sinks are still available
-            print ("hello")
+            print ("monotor 10 s loop")
             new_sinks = self.get_raop_sinks()
             for sink in self.all_sinks:
                 if not new_sinks.get_node_by_id(sink.id):
                     #sink does not exist anymore
-                    print(f"VARNING: Sink {sink.name} (ID {sink.id}) fÃ¶rsvunnen! Laddar om RAOP.")
+                    log_message(f"WARNING: Sink {sink.name} (ID {sink.id}) dissapeared! Reloading RAOP.", push=True, title="AudioRouter.monitor")
 
                     old_loopbacks = copy.deepcopy(self.loopbacks)
                     self.kill_all_audio()
@@ -588,7 +588,6 @@ def log_message(message, push=False, push_title = "Turntable"):
     if push or "ERROR" in message.upper():
         send_push (push_title, message)
 
-log_message ("Start audio-router" + str (time.time()))
 
 STATUS_FILE = "/tmp/audio-router-status.log"
 def write_status(message):
@@ -615,8 +614,9 @@ if __name__ == "__main__":
     PUSHOVER_TOKEN = os.getenv("PUSHOVER_TOKEN")
     
     wait_for_pactl()
+    log_message ("Start audio-router" + str (time.asctime()))
     router = AudioRouter()
-    print("PID:", os.getpid())
+    log_message("PID:", os.getpid())
     router.run()
 
 
