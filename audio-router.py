@@ -26,6 +26,9 @@ import signal
 import threading
 from dataclasses import dataclass
 from flash_led import FlashLedManager
+from send_push import send_push
+from dotenv import load_dotenv
+
 
 
 
@@ -319,7 +322,7 @@ class AudioRouter:
             else:
                 log_message(f"Waiting for sources... ({i+1}/{timeout})")
                 time.sleep(1)
-        log_message("ERROR: No valid sources found after waiting. Check PipeWire/PulseAudio!")
+        log_message("ERROR: No valid sources found after waiting. Check PipeWire/PulseAudio!", True, "get_all_sources")
     
     def sink_in_loopbacks(self, sink_name):
         for loopback in self.loopbacks:
@@ -341,7 +344,7 @@ class AudioRouter:
     def more_audio(self, sink_name):
         new_sink = self.all_sinks.get_node_by_name(sink_name)
         if not new_sink:
-            log_message(f"Sink {sink_name} not found")
+            log_message(f"Sink {sink_name} not found", True, "more_audio")
             self.led_manager.flash_error()
             return
         if self.sink_in_loopbacks(sink_name):
@@ -359,7 +362,7 @@ class AudioRouter:
                 self.loopbacks.remove(loopback)
                 log_message (f"Remove sink {sink_name} from loopback")
                 return
-        log_message(f"Loopback for sink {sink_name} not found")
+        log_message(f"Loopback for sink {sink_name} not found", True, "KillAudio")
     
     def kill_all_audio(self):
         for loopback in self.loopbacks:
@@ -418,7 +421,7 @@ class AudioRouter:
             restart_pulseaudio()
             write_status("PulseAudio restarted")
         elif sig == signal.SIGTERM or sig == signal.SIGINT:
-            print("Mottog SIGTERM/SIGINT - StÃ¤nger ner allt ljud")
+            print("Mottog SIGTERM/SIGINT - Stänger ner allt ljud")
             self.kill_all_audio()
             
             exit(0)
@@ -546,7 +549,7 @@ def raop_module_loaded ():
             break
     #load raop module
     if not raop_loaded:
-        log_message ("Raop module is not loaded")
+        log_message ("Raop module is not loaded", True, "raop_module_loaded")
     return raop_loaded
 
 def restart_pulseaudio ():
@@ -578,10 +581,12 @@ def wait_for_pactl():
 
 LOG_FILE = "/tmp/audio-router.log"
 
-def log_message(message):
+def log_message(message, push=False, push_title = "Turntable"):
     with open(LOG_FILE, "a") as f:
         f.write(f"{message}\n")
     print(message)  # Also print to system logs for debugging
+    if push or "ERROR" in message.upper():
+        send_push (push_title, message)
 
 log_message ("Start audio-router" + str (time.time()))
 
@@ -604,6 +609,11 @@ def read_command():
 
 
 if __name__ == "__main__":
+    load_dotenv()
+
+    PUSHOVER_USER = os.getenv("PUSHOVER_USER")
+    PUSHOVER_TOKEN = os.getenv("PUSHOVER_TOKEN")
+    
     wait_for_pactl()
     router = AudioRouter()
     print("PID:", os.getpid())
