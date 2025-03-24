@@ -19,7 +19,13 @@ from flash_led import FlashLedManager
 from send_push import send_push
 from dotenv import load_dotenv
 from nodes import Loopback, Node, Nodes, Sink
+from dataclasses import dataclass, field
 
+@dataclass
+class EventCommand:
+    action: str
+    sink: str = ""
+    timestamp: str = field(default_factory=lambda: time.asctime())
 
 
 
@@ -48,6 +54,10 @@ class AudioRouter:
             self.current_source = None
             log_message("FATAL: No input source found")
         self.loopbacks = []
+        
+
+        
+
         #remove all loopbacks currently running in the system
         
                 
@@ -59,6 +69,10 @@ class AudioRouter:
         signal.signal(signal.SIGHUP, self.handle_signal) # starta om raop discover
         signal.signal(signal.SIGTERM, self.handle_signal) # StÃ¤ng av alla loopbackar
         signal.signal(signal.SIGINT, self.handle_signal)
+
+        #signal management
+        self.command_queue = []
+        self.signal_event = threading.Event()
 
     def __exit__(self):
         self.kill_all_audio()
@@ -255,16 +269,19 @@ class AudioRouter:
             elif command == "next":
                 next_sink_name = self.get_next_sink_name()
                 if next_sink_name:
-                    self.switch_audio(next_sink_name)
-                    write_status(f"SUCCESS: Switched to {next_sink_name}")
+                    self.command_queue.append(EventCommand(action="switch", sink=next_sink_name))
+                    #self.switch_audio(next_sink_name)
+                    #write_status(f"SUCCESS: Switched to {next_sink_name}")
                 else:
                     write_status("ERROR: No valid sink found!")
             
             elif command == "prev":
                 prev_sink_name = self.get_prev_sink_name()
                 if prev_sink_name:
-                    self.switch_audio(prev_sink_name)
-                    write_status(f"SUCCESS: Switched to {prev_sink_name}")
+                    self.command_queue.append(EventCommand(action="switch", sink=prev_sink_name))
+
+                    #self.switch_audio(prev_sink_name)
+                    #write_status(f"SUCCESS: Switched to {prev_sink_name}")
                 else:
                     write_status("ERROR: No valid sink found!")
             
@@ -274,25 +291,32 @@ class AudioRouter:
                 if sink:
                     #check if sink is already in loopbacks, then kill it
                     if self.sink_in_loopbacks(sink.name):
-                        self.kill_audio(sink.name)
-                        write_status(f"SUCCESS: Shut off {sink.name}")
+                        self.command_queue.append(EventCommand(action="kill", sink=sink.name))
+                        #self.kill_audio(sink.name)
+                        #write_status(f"SUCCESS: Shut off {sink.name}")
                     #if not, open a loopback
                     else:
-                        self.more_audio(sink.name)
+                        self.command_queue.append(EventCommand(action="add", sink=sink.name))
+                        """#self.more_audio(sink.name)
                         write_status(f"SUCCESS: Added {sink.name} as sound output.")
                         #loop for debugging purposes. remove later
                         for loopback in self.loopbacks:
                             if loopback.sink.name == sink.name:
                                 print (f"pw ids: {loopback.get_pipewire_ids()}")
-                                break
+                                break"""
                 else: 
                     write_status(f"ERROR: Unknown command '{command}'")
                     self.led_manager.flash_error()
+            self.signal_event.set() #wake up monitor thread
         
         elif sig == signal.SIGUSR2:
-            log_message("Reloading PulseAudio")
-            restart_pulseaudio()
-            write_status("PulseAudio restarted")
+            #log_message("Reloading PulseAudio")
+            self.command_queue.append(EventCommand(action="kill_all"))
+            self.command_queue.append(EventCommand(action="restart"))
+            #restart_pulseaudio()
+            #write_status("PulseAudio restarted")
+            self.signal_event.set() #wake up monitor thread
+
         elif sig == signal.SIGTERM or sig == signal.SIGINT:
             log_message("Received SIGTERM/SIGINT - Shutting down all audio loopbacks", push = True, push_title="AudioRouter.handle_signal")
             self.kill_all_audio()
@@ -346,7 +370,35 @@ class AudioRouter:
             return modules
         
         while True:
-            time.sleep(10)
+            self.signal_event.wait(timeout=10)
+
+            while self.command_queue:
+                event = self.command_queue.pop(0)
+                if event.action == "switch":
+                    self.switch_audio(event.sink)
+                    write_status(f"SUCCESS: Switched to {event.sink}")
+
+                elif event.action == "add":
+                    self.more_audio(event.sink)
+                    write_status(f"SUCCESS: Added {event.sink} as sound output.")
+                    #loop for debugging purposes. remove later
+                    for l in self.loopbacks:
+                        if l.sink.name == event.sink:
+                            print (f"pw ids: {l.get_pipewire_ids()}")
+                            break
+                elif event.action == "kill":
+                    self.kill_audio(event.sink)
+                    write_status(f"SUCCESS: Shut off {event.sink}")
+                elif event.action == "kill_all":
+                    self.kill_all_audio()
+                    write_status("SUCCESS: All audio loopbacks shut off")
+                elif event.action == "restart": 
+                    restart_pulseaudio()
+                    write_status("SUCCESS: PulseAudio restarted")
+                else:
+                    log_message(f"ERROR: Unknown event action {event.action}")
+            self.signal_event.clear() #the event has been handled
+
             #Check if all sinks are still available
             print ("AudioRouter.monitor 10 s loop")
             new_sinks = self.get_raop_sinks()
@@ -364,16 +416,14 @@ class AudioRouter:
                     for old_loopback in old_loopbacks:
                         new_sink = self.all_sinks.get_node_by_name(old_loopback.sink.name)
                         if new_sink:
-                            loopback = Loopback(old_loopback.source, new_sink)
-                            self.loopbacks.append(loopback)
+                            new_loopback = Loopback(old_loopback.source, new_sink)
+                            self.loopbacks.append(new_loopback)
                     break
             
             #check if sinks are RUNNING
             result = subprocess.run(["pactl", "list", "modules"], capture_output=True, text=True, check=True)
             result = result.stdout
-            if not result:
-                time.sleep(10)
-                continue
+           
             modules = parse_pactl_module_output(result)
             result_sinks = subprocess.run(["pactl", "list", "sinks", "short"], capture_output=True, text=True, check=True)
             result_sinks.stdout.strip()
