@@ -7,152 +7,19 @@
 # signal funktion som lyssnar efter signaler frÃ¥n andra program. 
 
 
-#SUPPORTFUNKTIONER
-#KLASSER 
-# Loopback - klass som hanterar loopbackar. Brygga mellan pulseaudio och pipewire
-# Nodes - klass som hanterar sources / sinks 
-# Sinklist - klass som hanterar en lista av sinks.
-# Sink - klass som hanterar sinks. Ãrver frÃ¥n Node.
-# Source - klass som hanterar sources. Ãrver frÃ¥n Node.
-# Node - klass som hanterar en nod.
-# AudioRouter - huvudklass som hanterar ljudvÃ¤xlingar.
 
 import os
-import json
 import subprocess
 import time
 import copy
 import signal
 import threading
-from dataclasses import dataclass
+from systemd import journal
 from flash_led import FlashLedManager
 from send_push import send_push
 from dotenv import load_dotenv
+from nodes import Loopback, Node, Nodes, Sink
 
-
-
-
-class Loopback:
-    def __init__(self, source, sink):
-        result = subprocess.run(
-            ["pactl", "load-module", "module-loopback", f"source={source.id}", f"sink={sink.id}"],
-            capture_output=True, text=True, check=False)
-
-        result = result.stdout.split()
-        self.id = result[0]
-        self.source = source
-        self.sink = sink
-    
-    def get_pipewire_ids(self):
-        try:
-            # KÃ¶r pw-dump och ladda JSON-utdata
-            result = subprocess.run(["pw-dump"], capture_output=True, text=True, check=True)
-            nodes = json.loads(result.stdout)
-
-            # Filtrera noder som har rÃ¤tt PulseAudio-modul-ID
-            node_ids = []
-            for node in nodes:
-                if "info" in node and "props" in node["info"]:
-                    props = node["info"]["props"]
-                    module_id = props.get("pulse.module.id")
-
-                    # Only print nodes that contain module ID
-                    if module_id is not None:
-                        if int(module_id) == int(self.id):
-                            print(f"Node ID: {node['id']}, Module ID: {module_id}")
-                            node_ids.append(node['id'])
-
-                if "info" in node and "props" in node["info"]:
-                    
-                    module_id = node["info"]["props"].get("pulse.module.id")
-                   
-                   
-        
-
-            return node_ids
-        
-        
-        except subprocess.CalledProcessError as e:
-            print(f"Fel vid kÃ¶rning av pw-dump: {e}")
-            return []
-        except json.JSONDecodeError as e:
-            print(f"Fel vid tolkning av JSON: {e}")
-            return []
-
-    def remove(self):
-        # delete the pw loopback modules
-        node_ids = self.get_pipewire_ids()
-        for node_id in node_ids:
-            subprocess.run(["pw-cli", "destroy", str(node_id)], check=True)
-        
-    def __enter__(self):
-        #return self to be used within the with block
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        # Clean up resources when exiting the with block
-        self.remove()
-
-    # Optionally, you can define __del__ as a backup.
-    def __del__(self):
-        try:
-            self.remove()
-        except Exception:
-            pass  # Avoid errors during interpreter shutdown
-@dataclass
-class Node:
-    id: int
-    name: str
-
-@dataclass
-class Sink(Node): 
-    airplay: bool = True
-
-class Nodes:
-    def __init__(self):
-        self.node_array = []
-
-    def get_node_by_id(self, node_id):
-        for node in self.node_array:
-            if node.id == node_id:
-                return node
-        return None
-    
-    def get_node_by_name(self, node_name):
-        for node in self.node_array:
-            if node.name == node_name:
-                return node
-        return None
-    
-    def get_index_by_name(self, node_name):
-        for i in range(len(self.node_array)):
-            if self.node_array[i].name == node_name:
-                return i
-        return -1
-    
-    def is_node_name (self, pattern):
-        for node in self.node_array:
-            if pattern.lower() in node.name.lower():
-                return node
-        return None
-    
-    def append(self, node):
-        self.node_array.append(node)
-    
-    def remove(self, node_id):
-        for node in self.node_array:
-            if node.id == node_id:
-                self.node_array.remove(node)
-                return
-        print(f"Node {node_id} not found")
-
-    def __iter__(self):
-        return iter(self.node_array)
-    
-    def __len__(self):
-        return len(self.node_array)
-    def __getitem__(self,i):
-        return self.node_array[i]
 
 
 
@@ -179,7 +46,7 @@ class AudioRouter:
                 raise Exception
         except:
             self.current_source = None
-            print("FATAL: No input source found")
+            log_message("FATAL: No input source found")
         self.loopbacks = []
         #remove all loopbacks currently running in the system
         
@@ -220,11 +87,10 @@ class AudioRouter:
                 else:
                     log_message(f"Waiting for sinks... ({i+1}/{timeout})")
             except subprocess.CalledProcessError as e:
-                print(f"Error running pactl: {e}")
+                log_message(f"Error running pactl: {e}")
                 self.led_manager.flash_error()
                 return []
             time.sleep(1)
-        self.led_manager.flash_ok()
         return sinks
     
     def get_next_sink_id(self):
@@ -334,7 +200,7 @@ class AudioRouter:
     def switch_audio(self, sink_name):
         new_sink = self.all_sinks.get_node_by_name(sink_name)
         if not new_sink:
-            print(f"Sink {sink_name} not found")
+            log_message(f"When switching audio sink, Sink {sink_name} not found")
             return
         self.kill_all_audio()
         #create new loopback
@@ -352,17 +218,19 @@ class AudioRouter:
         else:
             loopback = Loopback(self.current_source, new_sink)
             self.loopbacks.append(loopback)
-            log_message (f"Opened sink between {self.current_source} and {sink_name}")
+            log_message (f"Opened sink between {self.current_source} and {new_sink}")
             self.led_manager.flash_ok()
     
     def kill_audio(self, sink_name):
         for loopback in self.loopbacks:
             if loopback.sink.name == sink_name:
-                loopback.remove()
-                self.loopbacks.remove(loopback)
-                log_message (f"Remove sink {sink_name} from loopback")
-                return
-        log_message(f"Loopback for sink {sink_name} not found", True, "KillAudio")
+                try:
+                    loopback.remove()
+                    self.loopbacks.remove(loopback)
+                    log_message (f"Remove sink {sink_name} from loopback")
+                    return
+                except:
+                    log_message(f"Loopback for sink {sink_name} not found", True, "KillAudio")
     
     def kill_all_audio(self):
         for loopback in self.loopbacks:
@@ -371,9 +239,9 @@ class AudioRouter:
     
   
     def handle_signal(self, sig, frame):
-        #Hanterar inkommande signaler fÃ¶r att styra ljudvÃ¤xlingen
+        #Hanterar inkommande signaler för att styra ljudväxlingen
         
-        # LÃ¤s kommando frÃ¥n filen
+        # Läs kommando från filen
         command = read_command()
 
         log_message(f"Received signal: {sig} with command: {command}")
@@ -400,18 +268,23 @@ class AudioRouter:
                 else:
                     write_status("ERROR: No valid sink found!")
             
-            else:
+            elif command: #if command is not empty
                 #is it part of a sink name?
                 sink = self.all_sinks.is_node_name(command)
                 if sink:
+                    #check if sink is already in loopbacks, then kill it
                     if self.sink_in_loopbacks(sink.name):
                         self.kill_audio(sink.name)
                         write_status(f"SUCCESS: Shut off {sink.name}")
-
+                    #if not, open a loopback
                     else:
                         self.more_audio(sink.name)
-                        write_status(f"SUCCESS: Switched to {sink.name}")
-                    self.led_manager.flash_ok()
+                        write_status(f"SUCCESS: Added {sink.name} as sound output.")
+                        #loop for debugging purposes. remove later
+                        for loopback in self.loopbacks:
+                            if loopback.sink.name == sink.name:
+                                print (f"pw ids: {loopback.get_pipewire_ids()}")
+                                break
                 else: 
                     write_status(f"ERROR: Unknown command '{command}'")
                     self.led_manager.flash_error()
@@ -421,7 +294,7 @@ class AudioRouter:
             restart_pulseaudio()
             write_status("PulseAudio restarted")
         elif sig == signal.SIGTERM or sig == signal.SIGINT:
-            print("Mottog SIGTERM/SIGINT - Stänger ner allt ljud")
+            log_message("Received SIGTERM/SIGINT - Shutting down all audio loopbacks", push = True, push_title="AudioRouter.handle_signal")
             self.kill_all_audio()
             
             exit(0)
@@ -433,26 +306,39 @@ class AudioRouter:
             #Parses pactl module output into a structured list of dictionaries.
             modules = []
             current_module = {}
-
+            is_argument = False
+            
             for line in output.split("\n"):
                 line = line.strip()
+                
                 if not line:
                     continue  # Skip empty lines
 
                 if line.startswith("Module #"):
                     if current_module:  # Save the previous module
                         modules.append(current_module)
-                    current_module = {"Properties": {}}
+                    current_module = {"Properties": {}, "Arguments":{}}
                     current_module["ID"] = line.split("#")[1].strip()
+                    is_argument=False
                 elif line.startswith("Name:"):
                     current_module["Name"] = line.split(":", 1)[1].strip()
                 elif line.startswith("Argument:"):
-                    current_module["Arguments"] = line.split(":", 1)[1].strip()
+                    if "{" not in line:
+                        current_module["Arguments"] = line.split(":", 1)[1].strip()
+                    else:
+                        is_argument=True
+
+                elif "}" in line: #end of argumente clause
+                    is_argument=False
                 elif line.startswith("Usage counter:"):
                     current_module["Usage Counter"] = line.split(":", 1)[1].strip()
                 elif "=" in line:
                     key, value = line.split("=", 1)
-                    current_module["Properties"][key.strip()] = value.strip().strip('"')
+                    if is_argument:
+                        current_module["Arguments"][key.strip()] = value.strip().strip('"')
+                    else:
+                        current_module["Properties"][key.strip()] = value.strip().strip('"')
+ 
 
             if current_module:
                 modules.append(current_module)  # Add last module
@@ -462,12 +348,12 @@ class AudioRouter:
         while True:
             time.sleep(10)
             #Check if all sinks are still available
-            print ("monotor 10 s loop")
+            print ("AudioRouter.monitor 10 s loop")
             new_sinks = self.get_raop_sinks()
             for sink in self.all_sinks:
                 if not new_sinks.get_node_by_id(sink.id):
                     #sink does not exist anymore
-                    log_message(f"WARNING: Sink {sink.name} (ID {sink.id}) dissapeared! Reloading RAOP.", push=True, title="AudioRouter.monitor")
+                    log_message(f"WARNING: Sink {sink.name} (ID {sink.id}) dissapeared! Reloading RAOP.", push=True, push_title="AudioRouter.monitor")
 
                     old_loopbacks = copy.deepcopy(self.loopbacks)
                     self.kill_all_audio()
@@ -481,7 +367,7 @@ class AudioRouter:
                             loopback = Loopback(old_loopback.source, new_sink)
                             self.loopbacks.append(loopback)
                     break
-            """
+            
             #check if sinks are RUNNING
             result = subprocess.run(["pactl", "list", "modules"], capture_output=True, text=True, check=True)
             result = result.stdout
@@ -492,39 +378,43 @@ class AudioRouter:
             result_sinks = subprocess.run(["pactl", "list", "sinks", "short"], capture_output=True, text=True, check=True)
             result_sinks.stdout.strip()
             for loopback in self.loopbacks:
+                
                 for module in modules:
                     if "Arguments" in module:
-                        if "sink="+loopback.sink.id in module["Arguments"]:
+                        if "sink="+str(loopback.sink.id) in module["Arguments"]:
                             #check if module is running
                             try:
                                 found_loopback = False
                                 for line in result_sinks.stdout.split("\n"):
-                                    if loopback.sink in line:
+                                    if str(loopback.sink.id) in line:
                                         found_loopback = True
                                         if "RUNNING" not in line:
-                                            print(f"Sink {loopback.sink} not running")
+                                            log_message(f"ERROR: Loopback for sink {loopback.sink} not running")
                                             raise Exception
                                         else:
                                             break
                                 if not found_loopback:
-                                    print(f"Loopback for sink {loopback.sink} not found")
+                                    log_message(f"ERROR: Loopback for sink {loopback.sink} not found")
                                     raise Exception
                                    
                             except:
                                 self.kill_audio(loopback.sink)
-                                print(f"Loopback for sink {loopback.sink} not running")
+                                log_message(f"Killing audio to sink {loopback.sink}, and deleting Loopback sink")
                                 break
-                                print(f"Killing audio to sink {loopback.sink}")
+                               
 
-            """
+            
 
 
 
             
     def run(self):
         self.monitor()
-         
+ 
 
+###############################################
+######### SUPPORT FUNCTIONS ###################
+###############################################
 
 RELOAD_LOCK = threading.Lock()  # Create a lock object
 RESTART_LOCK = threading.Lock()  # Create a lock object
@@ -558,7 +448,7 @@ def restart_pulseaudio ():
             log_message("Restarting Pulse Audio and Pipewire")
             subprocess.run (["systemctl" ,"--user", "restart",  "pipewire", "pipewire-pulse"])
     except subprocess.CalledProcessError:
-        log_message ("Failed to restart Pipewire and PulseAudio")
+        log_message ("ERROR: Failed to restart Pipewire and PulseAudio")
     if not raop_module_loaded():
         reload_module_raop_discover(unload_first=False)
         
@@ -575,9 +465,13 @@ def wait_for_pactl():
         except subprocess.CalledProcessError:
             print(f"pactl not ready, retrying... ({i+1}/{retries})")
             time.sleep(2)
-    print("pactl failed to start after retries. Exiting.")
+    log_message("ERROR: pactl failed to start after retries. Exiting.")
     exit(1)
 
+##################################################
+############ LOGGING & STATUS FUNCTIONS ##########
+##################################################
+    
 
 LOG_FILE = "/tmp/audio-router.log"
 
@@ -585,8 +479,10 @@ def log_message(message, push=False, push_title = "Turntable"):
     with open(LOG_FILE, "a") as f:
         f.write(f"{message}\n")
     print(message)  # Also print to system logs for debugging
+    journal.send(MESSAGE = message, SYSLOG_IDENTIFIER="audio-router") # Write to journald 
     if push or "ERROR" in message.upper():
         send_push (push_title, message)
+
 
 
 STATUS_FILE = "/tmp/audio-router-status.log"
@@ -594,9 +490,10 @@ def write_status(message):
     """Skriver status om senaste åtgärden"""
     with open(STATUS_FILE, "w") as f:
         f.write(message + "\n")
-    log_message(f"STATUS: {message}")
+    log_message(f"STATUS: {message}", push=True)
     
 COMMAND_FILE = "/tmp/audio-router-command"
+# read_command opens the COMMAND_FILE to look for parameters
 def read_command():
     try:
         with open(COMMAND_FILE, "r") as f:
@@ -605,8 +502,6 @@ def read_command():
         log_message ("No command sent")
         return None
 
-
-
 if __name__ == "__main__":
     load_dotenv()
 
@@ -614,9 +509,9 @@ if __name__ == "__main__":
     PUSHOVER_TOKEN = os.getenv("PUSHOVER_TOKEN")
     
     wait_for_pactl()
-    log_message ("Start audio-router" + str (time.asctime()))
+    log_message ("Start audio-router " + str (time.asctime()), push=True)
     router = AudioRouter()
-    log_message("PID:", os.getpid())
+    log_message("PID: " + str(os.getpid()))
     router.run()
 
 
