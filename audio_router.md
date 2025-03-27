@@ -1,5 +1,5 @@
 # Audio Router – Dokumentation
-📌 **Syfte** : Jag ville koppla ihop min vinylspelare med mina Apple Homepods. För det ändamålet har jag skapat denna mjukvara för Raspeberry Pi. Audio Router är en service för Raspberry Pi som som hanterar ljudväxling till Appleplay-enheter som Homepods, aka RAOP-sinks (Remote Audio Output Protocol).  Den hanterar:
+📌 **Syfte**: Jag ville koppla ihop min vinylspelare med mina Apple Homepods. För det ändamålet har jag skapat denna mjukvara för Raspeberry Pi. Audio Router är en service för Raspberry Pi som som hanterar ljudväxling till Appleplay-enheter som Homepods, aka RAOP-sinks (Remote Audio Output Protocol).  Den hanterar:
 * **Sink- och source-listor** genom att hämta och analysera pactl-utdata.
 * **Dynamisk ljudväxling** mellan olika ljudenheter.
 * **Signalhantering** för externa kontroller via kill -SIGUSR1 och kill -SIGUSR2.
@@ -154,7 +154,7 @@ sudo systemctl start audio-router.service
 
 
 # 8. Framtida förbättringar
-✅ **Smartare felsökning** – Lägg till automatiska tester för att upptäcka ljudproblem. ✅ **Webbgränssnitt/API** – Göra tjänsten mer interaktiv med en webbaserad kontrollpanel. ✅ **Bättre logghantering** – Möjlighet att aktivera/döda loggning vid behov.
+✅ **Smartare felsökning** – Lägg till automatiska tester för att upptäcka ljudproblem.✅ **Webbgränssnitt/API** – Göra tjänsten mer interaktiv med en webbaserad kontrollpanel.✅ **Bättre logghantering** – Möjlighet att aktivera/döda loggning vid behov.
 
 # 🔧 Sammanfattning
 * **Audio Router** hanterar RAOP-sinks och möjliggör smidig växling av ljud.

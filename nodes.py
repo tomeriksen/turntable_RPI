@@ -15,14 +15,17 @@ import json
 
 class Loopback:
     def __init__(self, source, sink):
-        result = subprocess.run(
-            ["pactl", "load-module", "module-loopback", f"source={source.id}", f"sink={sink.id}"],
-            capture_output=True, text=True, check=False)
+        try:
+            result = subprocess.run(
+                ["pactl", "load-module", "module-loopback", f"source={source.id}", f"sink={sink.id}"],
+                capture_output=True, text=True, check=False)
 
-        result = result.stdout.split()
-        self.id = result[0]
-        self.source = source
-        self.sink = sink
+            result = result.stdout.split()
+            self.id = result[0]
+            self.source = source
+            self.sink = sink
+        except subprocess.CalledProcessError as e:
+            print(f"ERROR: Could not create loopback to {sink.name}: {e}")
     
     def get_pipewire_ids(self):
         try:
@@ -40,7 +43,7 @@ class Loopback:
                     # Only print nodes that contain module ID
                     if module_id is not None:
                         if int(module_id) == int(self.id):
-                            print(f"Loopback Node ID: {node['id']}, Module ID: {module_id}")
+                            print(f"Loopback Node ID: {node['id']}, Pulse ID: {module_id}")
                             node_ids.append(node['id'])
 
                 if "info" in node and "props" in node["info"]:
@@ -71,17 +74,21 @@ class Loopback:
             except Exception as e:
                 print(f"Error checking node existence: {e}")
                 return False
+        
         # delete the pw loopback modules
-        node_ids = self.get_pipewire_ids()
-        for node_id in node_ids:
-            if node_exists(node_id):
-                try: 
-                    subprocess.run(["pw-cli", "destroy", str(node_id)], check=True)
-                    print(f"Destroyed node {node_id}")
-                except subprocess.CalledProcessError as e:
-                    print(f"Error destroying node {node_id}: {e}")
-            else:
-                print(f"Node {node_id} does not exist")
+        pw_node_ids = self.get_pipewire_ids()
+        if not pw_node_ids:
+            print(f"No PipeWire nodes found connected to  loopback {self.id}")
+        else:
+            for pw_node_id in pw_node_ids:
+                if node_exists(pw_node_id):
+                    try: 
+                        subprocess.run(["pw-cli", "destroy", str(pw_node_id)], check=True)
+                        print(f"Destroyed node {pw_node_id}")
+                    except subprocess.CalledProcessError as e:
+                        print(f"Error destroying node {pw_node_id}: {e}")
+                else:
+                    print(f"Node {pw_node_id} does not exist")
         
     def __enter__(self):
         #return self to be used within the with block
@@ -95,6 +102,7 @@ class Loopback:
     def __del__(self):
         try:
             self.remove()
+            print(f"Loopback deleted: {self.sink.name}")
         except Exception:
             pass  # Avoid errors during interpreter shutdown
     
