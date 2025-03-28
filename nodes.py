@@ -21,6 +21,7 @@ class Loopback:
                 capture_output=True, text=True, check=False)
 
             result = result.stdout.split()
+            sink.status = "RUNNING"
             self.id = result[0]
             self.source = source
             self.sink = sink
@@ -63,7 +64,7 @@ class Loopback:
             print(f"Fel vid tolkning av JSON: {e}")
             return []
 
-    def remove(self):
+    def remove_in_os(self):
         #check if node exists
         def node_exists(node_id: int) -> bool:
         #Check if a PipeWire node with given ID exists.
@@ -84,28 +85,19 @@ class Loopback:
                 if node_exists(pw_node_id):
                     try: 
                         subprocess.run(["pw-cli", "destroy", str(pw_node_id)], check=True)
-                        print(f"Destroyed node {pw_node_id}")
+                        print(f"Loopback.remove: Destroyed pw node {pw_node_id} to pa sink {self.sink.name}")
                     except subprocess.CalledProcessError as e:
-                        print(f"Error destroying node {pw_node_id}: {e}")
+                        print(f"Loopback.remove: Error destroying pipewire node {pw_node_id}: {e}")
                 else:
-                    print(f"Node {pw_node_id} does not exist")
+                    print(f"Pipewire node {pw_node_id} does not exist")
+        self.sink.status = "SUSPENDED"
         
     def __enter__(self):
         #return self to be used within the with block
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        # Clean up resources when exiting the with block
-        self.remove()
 
-    # Optionally, you can define __del__ as a backup.
-    def __del__(self):
-        try:
-            self.remove()
-            print(f"Loopback deleted: {self.sink.name}")
-        except Exception:
-            pass  # Avoid errors during interpreter shutdown
-    
+
     
     
 @dataclass
@@ -116,6 +108,14 @@ class Node:
 @dataclass
 class Sink(Node): 
     airplay: bool = True
+    status: str = "SUSPENDED"
+
+    def is_running(self,os_sink_status):
+        if self.status =="RUNNING":
+           return True
+        else:
+            return False
+        
 
 class Nodes:
     def __init__(self):

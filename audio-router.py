@@ -74,14 +74,22 @@ class AudioRouter:
         self.command_queue = []
         self.signal_event = threading.Event()
 
+    def __del__(self):
+        self.kill_all_audio()
+        self.led_manager.remove_all_leds()
+    
     def __exit__(self):
         self.kill_all_audio()
         self.led_manager.remove_all_leds()
+    
+
+    
 
 
     def get_raop_sinks(self, wait_after_restart = False):
         timeout = 1
         sinks = Nodes()
+        statuses = []
         if wait_after_restart:
             timeout = 10
         for i in range(timeout):
@@ -94,7 +102,8 @@ class AudioRouter:
                         if len(parts) > 1:  # Ensure we have enough data
                             id = parts[0]  # First column (sink ID)
                             name = parts[1]  # Second column (sink name)
-                            sinks.append(Sink(int(id), name, airplay=True))  # Create Sink object
+                            status = parts[6]  # Seventh column (sink status)
+                            sinks.append(Sink(int(id), name, airplay=True, status= status))  # Create Sink object
                             #log_message ("Adding sink: " + name)
                 if len(sinks):
                     break
@@ -240,9 +249,12 @@ class AudioRouter:
         for loopback in self.loopbacks:
             if loopback.sink.name == sink_name:
                 try:
-                    loopback.remove()
+                    loopback.remove_in_os()
                     self.loopbacks.remove(loopback)
                     log_message (f"Remove sink {sink_name} from loopback")
+                    #update status of sink
+                    index = self.all_sinks.get_index_by_name(sink_name)
+                    self.all_sinks[index].status = "SUSPENDED" #may not be needed as Loopback.remove sets status
                     return
                 except:
                     log_message(f"ERROR: Could not remove sink {sink_name} from loopback", True, "KillAudio")
@@ -251,7 +263,7 @@ class AudioRouter:
     
     def kill_all_audio(self):
         for loopback in self.loopbacks:
-            loopback.remove()
+            loopback.remove_in_os()
         self.loopbacks = []
     
   
@@ -312,111 +324,81 @@ class AudioRouter:
             
             exit(0)
 
-
+                         
     
     def monitor(self):
-        def parse_pactl_module_output(output):
-            #Parses pactl module output into a structured list of dictionaries.
-            modules = []
-            current_module = {}
-            is_argument = False
-            
-            for line in output.split("\n"):
-                line = line.strip()
-                
-                if not line:
-                    continue  # Skip empty lines
+        def restore_loopbacks():
+            #restore loopbacks
 
-                if line.startswith("Module #"):
-                    if current_module:  # Save the previous module
-                        modules.append(current_module)
-                    current_module = {"Properties": {}, "Arguments":{}}
-                    current_module["ID"] = line.split("#")[1].strip()
-                    is_argument=False
-                elif line.startswith("Name:"):
-                    current_module["Name"] = line.split(":", 1)[1].strip()
-                elif line.startswith("Argument:"):
-                    if "{" not in line:
-                        current_module["Arguments"] = line.split(":", 1)[1].strip()
-                    else:
-                        is_argument=True
+            #before killing audio copy loopbacks so we can restore them
+            old_loopback_names = [l.sink.name for l in self.loopbacks]
+            self.kill_all_audio()
+            restart_pulseaudio()
+            #reload_module_raop_discover()
+            self.all_sinks = self.get_raop_sinks()
+            for sink_name in old_loopback_names:
+                self.add_audio(sink_name)
+            return
+        #1. Check if all sinks are still available in PulseAudio and RUNNING. Reload RAOP if not.
+        #2. Check if all internal representation of loopbacks are actually running in the system. Kill and remove if not.
+        #3. Check if there are more/fewer loopbacks in system than in internal representation. Kill and remove if not.
 
-                elif "}" in line: #end of argumente clause
-                    is_argument=False
-                elif line.startswith("Usage counter:"):
-                    current_module["Usage Counter"] = line.split(":", 1)[1].strip()
-                elif "=" in line:
-                    key, value = line.split("=", 1)
-                    if is_argument:
-                        current_module["Arguments"][key.strip()] = value.strip().strip('"')
-                    else:
-                        current_module["Properties"][key.strip()] = value.strip().strip('"')
- 
-
-            if current_module:
-                modules.append(current_module)  # Add last module
-
-            return modules
+        #0. check there are as many sinks in system as in internal representation
+        os_sinks = self.get_raop_sinks()
+        if len (os_sinks) != len (self.all_sinks):
+            log_message("ERROR: Number of sinks in system does not match internal representation. Restarting RAOP.", push=True, push_title="AudioRouter.monitor")
+            restore_loopbacks()
+            return
         
-        #MAIN MONITOR TASKS
-        #Check if all sinks are still available
-        #print ("AudioRouter.monitor loop")
-        new_sinks = self.get_raop_sinks()
-        for sink in self.all_sinks:
-            if not new_sinks.get_node_by_id(sink.id):
-                #sink does not exist anymore
-                log_message(f"WARNING: Sink {sink.name} (ID {sink.id}) dissapeared! Reloading RAOP.", push=True, push_title="AudioRouter.monitor")
+        #1. Check if all sinks are still available and RUNNING
 
-                old_loopbacks = copy.deepcopy(self.loopbacks)
-                self.kill_all_audio()
-                restart_pulseaudio()
-                #reload_module_raop_discover()
-                self.all_sinks = self.get_raop_sinks() #sinks may have changed after reload
-                #try to reestablish loopbacks
-                for old_loopback in old_loopbacks:
-                    new_sink = self.all_sinks.get_node_by_name(old_loopback.sink.name)
-                    if new_sink:
-                        new_loopback = Loopback(old_loopback.source, new_sink)
-                        self.loopbacks.append(new_loopback)
-                break
-        #check if loopbacks are still running
-   
-        
-        #check if sinks are RUNNING
-        result = subprocess.run(["pactl", "list", "modules"], capture_output=True, text=True, check=True)
+        for saved_sink in self.all_sinks:
+           os_sink = os_sinks.get_node_by_id(saved_sink.id)
+           if not os_sink:
+               #sink does not exist anymore
+               log_message(f"WARNING: Sink {saved_sink.name} (ID {saved_sink.id}) dissapeared! Reloading RAOP.", push=True, push_title="AudioRouter.monitor")
+               restore_loopbacks()
+               return #let's assume everything is working until next monitor cycle
+           elif saved_sink.status == "RUNNING" and os_sink.status != "RUNNING":
+                #sink status has changed
+                log_message(f"WARNING: Sink {saved_sink.name} (ID {saved_sink.id}) status changed from {saved_sink.status} to {os_sink.status}. Reloading RAOP.", push=True, push_title="AudioRouter.monitor")
+                restore_loopbacks()
+                return
+           
+        #2. Check if all internal representation of loopbacks are actually running in the system. Kill and remove if not.
+
+        if len(self.loopbacks) == 0:
+            return #no loopbacks to check
+        result = subprocess.run(["pactl", "list", "modules", "short"], capture_output=True, text=True, check=True)
         result = result.stdout
-        
-        modules = parse_pactl_module_output(result)
-        result_sinks = subprocess.run(["pactl", "list", "sinks", "short"], capture_output=True, text=True, check=True)
-        result_sinks.stdout.strip()
-        for loopback in self.loopbacks:
-            
-            for module in modules:
-                if "Arguments" in module:
-                    if "sink="+str(loopback.sink.id) in module["Arguments"]:
-                        #check if module is running
-                        try:
-                            found_loopback = False
-                            for line in result_sinks.stdout.split("\n"):
-                                #if id first in line
-                                if line.startswith(str(loopback.sink.id)):
-                                    found_loopback = True
-                                    if "RUNNING" not in line:
-                                        log_message(f"ERROR: Loopback for sink {loopback.sink} not running")
-                                        raise Exception
-                                    else:
-                                        break
-                            if not found_loopback:
-                                log_message(f"ERROR: Loopback for sink {loopback.sink} not found")
-                                raise Exception
-                                
-                        except:
-                            self.kill_audio(loopback.sink.name)
-                            log_message(f"Killing audio to sink {loopback.sink}, and deleting Loopback sink")
-                            break
-                            
+        modules = []
+        for line in result.split("\n"):
+            if "loopback" in line:
 
-            
+                parts = line.split()
+                #id = int(parts[0])
+                #source = int(parts[2].split("=")[-1])
+                sink_id = int(parts[3].split("=")[-1])
+                modules.append((sink_id))
+        #3. Check if there are more/fewer loopbacks in system than in internal representation. Kill and remove if not.
+        if len(modules) != len(self.loopbacks):
+            log_message(f"ERROR: Number of loopbacks ({len(modules)}) in system does not match internal representation ({len(self.loopbacks)}). Restarting RAOP.", push=True, push_title="AudioRouter.monitor")
+            restore_loopbacks()
+            return
+        
+        for loopback in self.loopbacks:
+            if not loopback.sink.id in modules:
+                log_message(f"ERROR: Loopback for sink {loopback.sink} not running. Removing loopback.")
+                self.kill_audio(loopback.sink.name)
+                return
+        if len(self.loopbacks) != len(modules):
+            log_message("ERROR: Number of loopbacks in system does not match internal representation. Restarting RAOP.", push=True, push_title="AudioRouter.monitor")
+            restore_loopbacks()
+
+       
+
+               
+
 
 
 
@@ -551,11 +533,19 @@ if __name__ == "__main__":
 
     PUSHOVER_USER = os.getenv("PUSHOVER_USER")
     PUSHOVER_TOKEN = os.getenv("PUSHOVER_TOKEN")
+    DEFAULT_OUTPUT = "Vardagsrum."
     
     wait_for_pactl()
     log_message ("Start audio-router " + str (time.asctime()), push=True)
     router = AudioRouter()
     log_message("PID: " + str(os.getpid()))
+    sink = router.all_sinks.is_node_name(DEFAULT_OUTPUT)
+    router.command_queue.append(EventCommand(action="add", sink_name=sink.name))
+    router.signal_event.set() #wake up monitor thread
+    
     router.run()
+  
+    
+    
 
 
