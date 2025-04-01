@@ -14,15 +14,16 @@ import os
 import json
 
 class Loopback:
-    def __init__(self, source, sink):
+    def __init__(self, source, sink, id=None):
         try:
-            result = subprocess.run(
-                ["pactl", "load-module", "module-loopback", f"source={source.id}", f"sink={sink.id}"],
-                capture_output=True, text=True, check=False)
-
-            result = result.stdout.split()
+            if not id: # if no id is given, create a new loopback
+                result = subprocess.run(
+                    ["pactl", "load-module", "module-loopback", f"source={source.id}", f"sink={sink.id}"],
+                    capture_output=True, text=True, check=False)
+                result = result.stdout.split()
+                id = result[0]
+            self.id = int(id)
             sink.status = "RUNNING"
-            self.id = result[0]
             self.source = source
             self.sink = sink
         except subprocess.CalledProcessError as e:
@@ -63,6 +64,16 @@ class Loopback:
         except json.JSONDecodeError as e:
             print(f"Fel vid tolkning av JSON: {e}")
             return []
+
+    #remove loopback from pulseaudio
+    def unload(self):
+        try:
+            # Unload the loopback module using pactl
+            result = subprocess.run(["pactl", "unload-module", str(self.id)], capture_output=True, text=True, check=True)
+            print(f"Loopback {self.id} removed from PulseAudio.")
+        except subprocess.CalledProcessError as e:
+            print(f"ERROR: Could not remove loopback {self.id}: {e}")
+        self.sink.status = "SUSPENDED"
 
     def remove_in_os(self):
         #check if node exists

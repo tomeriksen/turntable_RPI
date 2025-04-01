@@ -27,7 +27,8 @@ class EventCommand:
     sink_name: str = ""
     timestamp: str = field(default_factory=lambda: time.asctime())
 
-
+global STANDARD_SOURCE
+STANDARD_SOURCE = "alsa_input.platform-soc_sound.stereo-fallback"
 
 #########################################
 ###########AudioRouter Class ############
@@ -38,29 +39,36 @@ class AudioRouter:
     def __init__(self):
         self.led_manager = FlashLedManager()
         self.led_manager.flash_ok()
+
+        #check if pulesaudio is running
+        if not wait_for_pulseaudio():
+            restart_pulseaudio(delete_os_loopbacks=True)
         
-        restart_audio_server = not raop_module_loaded()
-        if restart_audio_server:
-            restart_pulseaudio()
         
-        self.all_sinks = self.get_raop_sinks(restart_audio_server)
-        self.all_sources = self.get_all_sources(restart_audio_server)
+        #check if raop module is loaded
+        if not raop_module_loaded():
+            log_message("Raop module is not loaded", True, "AudioRouter.__init__")
+            reload_module_raop_discover(unload_first=False)
+        
+        
+        self.all_sinks = self.get_raop_sinks()
+        self.all_sources = self.get_all_sources()
+        
+        
         
         try:
-            self.current_source = self.all_sources.get_node_by_name("alsa_input.platform-soc_sound.stereo-fallback")
+            self.current_source = self.all_sources.get_node_by_name(STANDARD_SOURCE)
             if not self.current_source:
                 raise Exception
         except:
             self.current_source = None
             log_message("FATAL: No input source found")
+       
+        
+
+        #add any loopbacks currently running in the system
         self.loopbacks = []
-        
-
-        
-
-        #remove all loopbacks currently running in the system
-        
-                
+        self.loopbacks = self.load_os_loopbacks()
         
 
         # Koppla signaler
@@ -218,6 +226,37 @@ class AudioRouter:
             if loopback.sink.name == sink_name:
                 return True
         return False
+    
+    def load_os_loopbacks(self):
+        #This function loads all loopbacks in the system associated with the standard source!!
+        """Returns all loopbacks in the system"""
+        result = subprocess.run(["pactl", "list", "modules", "short"], capture_output=True, text=True, check=True)
+        result = result.stdout.strip()
+        loopbacks = []
+        for line in result.split("\n"):
+            if "loopback" in line:
+                parts = line.split()
+                id = int(parts[0])
+                source_id = int(parts[2].split("=")[-1])
+                sink_id = int(parts[3].split("=")[-1])
+
+                #check if this is a raop loopback
+                sink = self.all_sinks.get_node_by_id(sink_id)
+                if not sink:
+                    continue
+
+                #check if source is STNDARD_SOURCE
+                source = self.all_sources.get_node_by_id(source_id)
+                if not source:
+                    continue
+                if source.name != STANDARD_SOURCE:
+                    #kill loopback
+                    log_message(f"Loopback {id} is not using standard source {STANDARD_SOURCE}. Removing loopback.")
+                    subprocess.run(["pactl", "unload-module", str(id)], capture_output=True, text=True, check=True)
+                    continue
+                #create loopback object
+                loopbacks.append(Loopback(source, sink, id))
+        return loopbacks
         
     
     def switch_audio(self, sink_name):
@@ -249,7 +288,8 @@ class AudioRouter:
         for loopback in self.loopbacks:
             if loopback.sink.name == sink_name:
                 try:
-                    loopback.remove_in_os()
+                    #loopback.remove_in_os()
+                    loopback.unload()
                     self.loopbacks.remove(loopback)
                     log_message (f"Remove sink {sink_name} from loopback")
                     #update status of sink
@@ -333,8 +373,10 @@ class AudioRouter:
             #before killing audio copy loopbacks so we can restore them
             old_loopback_names = [l.sink.name for l in self.loopbacks]
             self.kill_all_audio()
-            restart_pulseaudio()
+            restart_pulseaudio(delete_os_loopbacks=True)
             #reload_module_raop_discover()
+
+
             self.all_sinks = self.get_raop_sinks()
             for sink_name in old_loopback_names:
                 self.add_audio(sink_name)
@@ -353,7 +395,7 @@ class AudioRouter:
         #1. Check if all sinks are still available and RUNNING
 
         for saved_sink in self.all_sinks:
-           os_sink = os_sinks.get_node_by_id(saved_sink.id)
+           os_sink = os_sinks.get_node_by_name(saved_sink.name)
            if not os_sink:
                #sink does not exist anymore
                log_message(f"WARNING: Sink {saved_sink.name} (ID {saved_sink.id}) dissapeared! Reloading RAOP.", push=True, push_title="AudioRouter.monitor")
@@ -361,8 +403,8 @@ class AudioRouter:
                return #let's assume everything is working until next monitor cycle
            elif saved_sink.status == "RUNNING" and os_sink.status != "RUNNING":
                 #sink status has changed
-                log_message(f"WARNING: Sink {saved_sink.name} (ID {saved_sink.id}) status changed from {saved_sink.status} to {os_sink.status}. Reloading RAOP.", push=True, push_title="AudioRouter.monitor")
-                restore_loopbacks()
+                log_message(f"WARNING: Sink {saved_sink.name} (ID {saved_sink.id}) status changed from {saved_sink.status} to {os_sink.status}.", push=True, push_title="AudioRouter.monitor")
+                #restore_loopbacks() kan bero på att apple mutar om det är tysy = normalt
                 return
            
         #2. Check if all internal representation of loopbacks are actually running in the system. Kill and remove if not.
@@ -447,13 +489,22 @@ RESTART_LOCK = threading.Lock()  # Create a lock object
 
 def reload_module_raop_discover(unload_first= True):
     """Safely reloads module-raop-discover"""
-    with RELOAD_LOCK:  # Correct way to use a lock
-        print("Restarting module-raop-discover...")
-        if unload_first:
-            os.system("pactl unload-module module-raop-discover")
-            time.sleep(2)  # Avoid race conditions
-        os.system("pactl load-module module-raop-discover")
-        print("RAOP discover restarted.")
+    print("Restarting module-raop-discover...")
+    if unload_first:
+        os.system("pactl unload-module module-raop-discover")
+        time.sleep(2)  # Avoid race conditions
+    os.system("pactl load-module module-raop-discover")
+    print("RAOP discover restarted.")
+    #check if module is loaded
+    for i in range(5):
+        result = subprocess.run(["pactl", "list", "modules", "short"], capture_output=True, text=True, check=True)
+        if "module-raop-discover" in result.stdout:
+            print("Module raop-discover loaded successfully.")
+            return
+        else:
+            print(f"Waiting for raop module to load... ({i+1}/5)")
+            time.sleep(1)
+    print("ERROR: Failed to load module raop-discover.")
 
 def raop_module_loaded ():
     raop_loaded = False
@@ -468,11 +519,32 @@ def raop_module_loaded ():
         log_message ("Raop module is not loaded", True, "raop_module_loaded")
     return raop_loaded
 
-def restart_pulseaudio ():
+def restart_pulseaudio (delete_os_loopbacks = False):
     try:
         with RELOAD_LOCK:
+            if delete_os_loopbacks:
+                #delete all loopbacks in os
+                log_message("Deleting all RAOP loopbacks")
+                result = subprocess.run(["pactl", "list", "modules", "short"], capture_output=True, text=True, check=True)
+                for line in result.stdout.split("\n"):
+                    if "loopback" in line:
+                        parts = line.split()
+                        id = int(parts[0])
+                        subprocess.run(["pactl", "unload-module", str(id)], capture_output=True, text=True, check=True)
+                        log_message(f"pactl: Deleting loopback module {id}")
+
             log_message("Restarting Pulse Audio and Pipewire")
-            subprocess.run (["systemctl" ,"--user", "restart",  "pipewire", "pipewire-pulse"])
+            subprocess.run (["systemctl" ,"--user", "restart",  "pipewire", "pipewire-pulse"], capture_output=True, text=True, check=True)
+            #Stability: make sure raop module is loaded before movin on
+            for i in range(5):
+                #check if pulse audio is running
+                result = subprocess.run(["pactl", "info"], capture_output=True, text=True, check=True)
+                log_message ("Pipewire and PulseAudio restarted")
+                break
+                
+            else: 
+                log_message ("WARNING: RAOP sinks did not come back in time")
+
     except subprocess.CalledProcessError:
         log_message ("ERROR: Failed to restart Pipewire and PulseAudio")
     if not raop_module_loaded():
@@ -493,6 +565,28 @@ def wait_for_pactl():
             time.sleep(2)
     log_message("ERROR: pactl failed to start after retries. Exiting.")
     exit(1)
+
+def wait_for_pulseaudio(timeout=10):
+    start = time.time()
+    while True:
+        try:
+            subprocess.run(["pactl", "info"], check=True, stdout=subprocess.DEVNULL)
+            print("PulseAudio is ready!")
+            return True
+        except subprocess.CalledProcessError:
+            if time.time() - start > timeout:
+                print("Timeout: PulseAudio not ready.")
+                return False
+            time.sleep(0.5)
+
+def wait_for_journal():
+    try:
+        for i in range(5):
+            journal.send(MESSAGE="Test", SYSLOG_IDENTIFIER="audio-router")
+            time.sleep(0.2)
+    except Exception as e:
+        print(f"Journald not ready: {e}")
+
 
 ##################################################
 ############ LOGGING & STATUS FUNCTIONS ##########
@@ -530,6 +624,7 @@ def read_command():
 
 if __name__ == "__main__":
     load_dotenv()
+    wait_for_journal()
 
     PUSHOVER_USER = os.getenv("PUSHOVER_USER")
     PUSHOVER_TOKEN = os.getenv("PUSHOVER_TOKEN")
@@ -539,12 +634,12 @@ if __name__ == "__main__":
     log_message ("Start audio-router " + str (time.asctime()), push=True)
     router = AudioRouter()
     log_message("PID: " + str(os.getpid()))
-    sink = router.all_sinks.is_node_name(DEFAULT_OUTPUT)
-    router.command_queue.append(EventCommand(action="add", sink_name=sink.name))
-    router.signal_event.set() #wake up monitor thread
+    #sink = router.all_sinks.is_node_name(DEFAULT_OUTPUT)
+    #router.command_queue.append(EventCommand(action="add", sink_name=sink.name))
+    #router.signal_event.set() #wake up monitor thread
     
     router.run()
-  
+    
     
     
 
