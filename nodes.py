@@ -26,6 +26,7 @@ class Loopback:
             sink.status = "RUNNING"
             self.source = source
             self.sink = sink
+            print(f"Loopback created: {self.id} from {source.name} to {sink.name}")
         except subprocess.CalledProcessError as e:
             print(f"ERROR: Could not create loopback to {sink.name}: {e}")
     
@@ -75,6 +76,7 @@ class Loopback:
             print(f"ERROR: Could not remove loopback {self.id}: {e}")
         self.sink.status = "SUSPENDED"
 
+    #OBSLOTE
     def remove_in_os(self):
         #check if node exists
         def node_exists(node_id: int) -> bool:
@@ -126,7 +128,24 @@ class Sink(Node):
            return True
         else:
             return False
-        
+    
+    def canonical_name(self):
+        # Return a canonical name for the sink
+        parts = self.name.split(".")
+        return ".".join(parts[1:3]) if len(parts) > 3 else self.name
+    
+    def identifier_name(self):
+        # Return a identifier name for the sink
+        try:
+            parts = self.name.split(".")
+            return parts[1] if len(parts) > 3 else None
+        except IndexError:    
+            print(f"Error: Unable to split name '{self.name}' into parts.")
+            return None
+    
+    def __str__(self):
+        return f"Sink(id={self.id}, name={self.name}, status={self.status})"
+    
 
 class Nodes:
     def __init__(self):

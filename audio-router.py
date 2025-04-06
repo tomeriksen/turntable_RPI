@@ -10,6 +10,7 @@
 
 import os
 import subprocess
+import sys
 import time
 import copy
 import signal
@@ -27,8 +28,9 @@ class EventCommand:
     sink_name: str = ""
     timestamp: str = field(default_factory=lambda: time.asctime())
 
-global STANDARD_SOURCE
+global STANDARD_SOURCE, DEBUG
 STANDARD_SOURCE = "alsa_input.platform-soc_sound.stereo-fallback"
+DEBUG = sys.stdout.isatty()
 
 #########################################
 ###########AudioRouter Class ############
@@ -47,11 +49,11 @@ class AudioRouter:
         
         #check if raop module is loaded
         if not raop_module_loaded():
-            log_message("Raop module is not loaded", True, "AudioRouter.__init__")
+            log_message("Raop module is not loaded. Reloading…", True, "AudioRouter.__init__")
             reload_module_raop_discover(unload_first=False)
         
         
-        self.all_sinks = self.get_raop_sinks()
+        wait_for_sinks = self.get_raop_sinks(wait_after_restart=True)
         self.all_sources = self.get_all_sources()
         
         
@@ -91,7 +93,6 @@ class AudioRouter:
         self.led_manager.remove_all_leds()
     
 
-    
 
 
     def get_raop_sinks(self, wait_after_restart = False):
@@ -122,25 +123,27 @@ class AudioRouter:
                 self.led_manager.flash_error()
                 return []
             time.sleep(1)
+        else:
+            log_message("ERROR: No valid sinks found after waiting. Check PipeWire/PulseAudio!", True, "get_raop_sinks")
         return sinks
     
     def get_next_sink_id(self):
         """Returns the ID of the next available RAOP sink, cycling through them."""
         #refresh sinks
-        self.all_sinks = self.get_raop_sinks()
+        all_sinks = self.get_raop_sinks()
         
-        if not self.all_sinks:  # If no sinks exist, return None
+        if not all_sinks:  # If no sinks exist, return None
             return None
 
         # If no loopback exists, return the first sink
         if not self.loopbacks:
-            return self.all_sinks[0].id
+            return all_sinks[0].id #warning, this ID might have changed
         
         #id might have changed, fetch name of sink in loopback
         last_sink_name = self.loopbacks[-1].sink.name
 
         # Get all sink IDs and names as a list
-        sink_ids , sink_names = zip(*[(sink.id, sink.name) for sink in self.all_sinks])
+        sink_ids , sink_names = zip(*[(sink.id, sink.name) for sink in all_sinks])
         
 
         # Find index of the last used sink (default to -1 if not found)
@@ -157,46 +160,46 @@ class AudioRouter:
     def get_next_sink_name(self):
         """Returns the ID of the next available RAOP sink, cycling through them."""
         #refresh sinks
-        self.all_sinks = self.get_raop_sinks()
+        all_sinks = self.get_raop_sinks()
         
-        if not self.all_sinks:  # If no sinks exist, return None
+        if not all_sinks:  # If no sinks exist, return None
             return None
 
         # If no loopback exists, return the first sink
         if not self.loopbacks:
-            return self.all_sinks[0].name
+            return all_sinks[0].get_canonical_name()
         
         #id might have changed, fetch name of sink in loopback
         last_sink_name = self.loopbacks[-1].sink.name
 
         # Find index of the last used sink (default to -1 if not found)
-        last_index =  self.all_sinks.get_index_by_name(last_sink_name)
+        last_index =  all_sinks.get_index_by_name(last_sink_name)
 
         # Get the next sink in a circular manner
-        next_index = (last_index + 1) % len(self.all_sinks)
-        return self.all_sinks[next_index].name
+        next_index = (last_index + 1) % len(all_sinks)
+        return all_sinks[next_index].get_canonical_name()
     
     def get_prev_sink_name(self):
         """Returns the ID of the next available RAOP sink, cycling through them."""
         #refresh sinks
-        self.all_sinks = self.get_raop_sinks()
+        all_sinks = self.get_raop_sinks()
         
-        if not self.all_sinks:  # If no sinks exist, return None
+        if not all_sinks:  # If no sinks exist, return None
             return None
 
         # If no loopback exists, return the first sink
         if not self.loopbacks:
-            return self.all_sinks[0].name
+            return all_sinks[0].get_canonical_name()
         
         #id might have changed, fetch name of sink in loopback
         last_sink_name = self.loopbacks[-1].sink.name
 
         # Find index of the last used sink (default to -1 if not found)
-        last_index =  self.all_sinks.get_index_by_name(last_sink_name)
+        last_index =  all_sinks.get_index_by_name(last_sink_name)
 
         # Get the next sink in a circular manner
-        next_index = (last_index - 1) % len(self.all_sinks)
-        return self.all_sinks[next_index].name
+        next_index = (last_index - 1) % len(all_sinks)
+        return all_sinks[next_index].get_canonical_name()
 
    
     def get_all_sources(self, wait_after_restart = False):
@@ -233,6 +236,7 @@ class AudioRouter:
         result = subprocess.run(["pactl", "list", "modules", "short"], capture_output=True, text=True, check=True)
         result = result.stdout.strip()
         loopbacks = []
+        all_sinks = self.get_raop_sinks()
         for line in result.split("\n"):
             if "loopback" in line:
                 parts = line.split()
@@ -241,7 +245,7 @@ class AudioRouter:
                 sink_id = int(parts[3].split("=")[-1])
 
                 #check if this is a raop loopback
-                sink = self.all_sinks.get_node_by_id(sink_id)
+                sink = all_sinks.get_node_by_id(sink_id)
                 if not sink:
                     continue
 
@@ -255,12 +259,14 @@ class AudioRouter:
                     subprocess.run(["pactl", "unload-module", str(id)], capture_output=True, text=True, check=True)
                     continue
                 #create loopback object
+                print(f"Loopback {id} found in system. Adding to internal representation.")
                 loopbacks.append(Loopback(source, sink, id))
         return loopbacks
         
     
     def switch_audio(self, sink_name):
-        new_sink = self.all_sinks.get_node_by_name(sink_name)
+        all_sinks = self.get_raop_sinks()
+        new_sink = all_sinks.is_node_name(sink_name)
         if not new_sink:
             log_message(f"When switching audio sink, Sink {sink_name} not found")
             return
@@ -270,7 +276,8 @@ class AudioRouter:
         self.loopbacks.append(loopback)
 
     def add_audio(self, sink_name):
-        new_sink = self.all_sinks.get_node_by_name(sink_name)
+        all_sinks = self.get_raop_sinks()
+        new_sink = all_sinks.is_node_name(sink_name)
         if not new_sink:
             log_message(f"Sink {sink_name} not found", True, "more_audio")
             self.led_manager.flash_error()
@@ -278,11 +285,15 @@ class AudioRouter:
         if self.sink_in_loopbacks(sink_name):
             log_message (f"Tried to open already active sink {sink_name}")
         else:
-            loopback = Loopback(self.current_source, new_sink)
-            self.loopbacks.append(loopback)
-            print(f"add_audio: Created loopback {id(loopback)} for {new_sink.name}")
-            log_message (f"Opened sink between {self.current_source} and {new_sink}")
-            self.led_manager.flash_ok()
+            try:
+                loopback = Loopback(self.current_source, new_sink)
+                self.loopbacks.append(loopback)
+                print(f"add_audio: Created loopback {id(loopback)} for {new_sink.name}")
+                log_message (f"Opened sink between {self.current_source} and {new_sink}")
+                self.led_manager.flash_ok()
+            except subprocess.CalledProcessError as e:
+                log_message(f"ERROR: Could not create loopback to {sink_name}: {e}", True, "add_audio")
+                self.led_manager.flash_error()
     
     def kill_audio(self, sink_name):
         for loopback in self.loopbacks:
@@ -291,13 +302,12 @@ class AudioRouter:
                     #loopback.remove_in_os()
                     loopback.unload()
                     self.loopbacks.remove(loopback)
-                    log_message (f"Remove sink {sink_name} from loopback")
-                    #update status of sink
-                    index = self.all_sinks.get_index_by_name(sink_name)
-                    self.all_sinks[index].status = "SUSPENDED" #may not be needed as Loopback.remove sets status
+                    log_message (f"Remove sink {sink_name} from loopback")    
+                    self.led_manager.flash_ok_2()
                     return
                 except:
                     log_message(f"ERROR: Could not remove sink {sink_name} from loopback", True, "KillAudio")
+                    self.led_manager.flash_error()
                     return
         log_message(f"Loopback for sink {sink_name} not found", True, "KillAudio")
     
@@ -337,7 +347,8 @@ class AudioRouter:
             
             elif command: #if command is not empty
                 #is it part of a sink name?
-                sink = self.all_sinks.is_node_name(command)
+                all_sinks = self.get_raop_sinks()
+                sink = all_sinks.is_node_name(command)
                 if sink:
                     #check if sink is already in loopbacks, then kill it
                     if self.sink_in_loopbacks(sink.name):
@@ -347,6 +358,10 @@ class AudioRouter:
                         self.command_queue.append(EventCommand(action="add", sink_name=sink.name))
                 else: 
                     write_status(f"ERROR: Unknown command '{command}'")
+                    print(f"Available sinks: ({len(all_sinks)})")
+                    for sink in all_sinks:
+                        print (sink.name)
+                          
                     self.led_manager.flash_error()
             self.signal_event.set() #wake up monitor thread
         
@@ -371,41 +386,71 @@ class AudioRouter:
             #restore loopbacks
 
             #before killing audio copy loopbacks so we can restore them
-            old_loopback_names = [l.sink.name for l in self.loopbacks]
+            old_loopback_names = [l.sink.canonical_name() for l in self.loopbacks]
             self.kill_all_audio()
             restart_pulseaudio(delete_os_loopbacks=True)
             #reload_module_raop_discover()
 
 
-            self.all_sinks = self.get_raop_sinks()
-            for sink_name in old_loopback_names:
-                self.add_audio(sink_name)
+            all_sinks = self.get_raop_sinks()
+            for canonical_sink_name in old_loopback_names:
+                #check if sink is still available
+                sink = all_sinks.is_node_name(canonical_sink_name)
+                if not sink:
+                    log_message(f"Loopback Sink {canonical_sink_name} not found in system. Removing loopback.")
+                    continue
+                self.add_audio(sink.name)
             return
+
+        
+
+        # se till att ljud tar sig fram till den sink som användaren hade för avsikt att ljudsätta 
+
+        all_sinks = self.get_raop_sinks()
+        for loopback in self.loopbacks:
+            #check if loopback is still running
+            loopback_name = loopback.sink.canonical_name()
+            active_sink = all_sinks.is_node_name(loopback_name)
+            if not active_sink:
+                log_message(f"Loopback Sink {loopback_name} not found in system.")
+                log_message(f"See if a restart of pipewire can fix that")
+                restore_loopbacks()
+                #check if loopback is back
+                continue
+            else:
+                #check if sink is still running
+                if active_sink.status != "RUNNING":
+                    log_message(f"WARNING: Loopback Sink {loopback_name} is not running.")
+                    
+
+        """
         #1. Check if all sinks are still available in PulseAudio and RUNNING. Reload RAOP if not.
         #2. Check if all internal representation of loopbacks are actually running in the system. Kill and remove if not.
         #3. Check if there are more/fewer loopbacks in system than in internal representation. Kill and remove if not.
 
-        #0. check there are as many sinks in system as in internal representation
         os_sinks = self.get_raop_sinks()
-        if len (os_sinks) != len (self.all_sinks):
-            log_message("ERROR: Number of sinks in system does not match internal representation. Restarting RAOP.", push=True, push_title="AudioRouter.monitor")
-            restore_loopbacks()
-            return
+        #0 check if a loopback sink has gone missing
+        for loopback in self.loopbacks:
+            if not os_sinks.is_node_name(loopback.sink.canonical_name()):
+                log_message(f"ERROR: Loopback sink {loopback.sink.name} not found in system. Restarting pipewire.", push=True, push_title="AudioRouter.monitor")
+                restore_loopbacks()
+                return
+        
         
         #1. Check if all sinks are still available and RUNNING
 
         for saved_sink in self.all_sinks:
-           os_sink = os_sinks.get_node_by_name(saved_sink.name)
+           os_sink = os_sinks.get_node_by_name(saved_sink.canonical_name())
            if not os_sink:
                #sink does not exist anymore
-               log_message(f"WARNING: Sink {saved_sink.name} (ID {saved_sink.id}) dissapeared! Reloading RAOP.", push=True, push_title="AudioRouter.monitor")
-               restore_loopbacks()
-               return #let's assume everything is working until next monitor cycle
+               log_message(f"WARNING: Sink {saved_sink.canonical_name()} (ID {saved_sink.id}) dissapeared!")
+               #restore_loopbacks()
+               #return #let's assume everything is working until next monitor cycle
            elif saved_sink.status == "RUNNING" and os_sink.status != "RUNNING":
                 #sink status has changed
-                log_message(f"WARNING: Sink {saved_sink.name} (ID {saved_sink.id}) status changed from {saved_sink.status} to {os_sink.status}.", push=True, push_title="AudioRouter.monitor")
+                log_message(f"WARNING: Sink {saved_sink.name} (ID {saved_sink.id}) status changed from {saved_sink.status} to {os_sink.status}.")
                 #restore_loopbacks() kan bero på att apple mutar om det är tysy = normalt
-                return
+                #return
            
         #2. Check if all internal representation of loopbacks are actually running in the system. Kill and remove if not.
 
@@ -437,12 +482,7 @@ class AudioRouter:
             log_message("ERROR: Number of loopbacks in system does not match internal representation. Restarting RAOP.", push=True, push_title="AudioRouter.monitor")
             restore_loopbacks()
 
-       
-
-               
-
-
-
+       """
 
             
     def run(self):
@@ -512,11 +552,9 @@ def raop_module_loaded ():
     for line in result.stdout.split("\n"):  # Split into lines
         if "module-raop-discover" in line:
             raop_loaded = True
-            log_message ("Raop module is loaded")
+            log_message ("Raop module is loaded", True, "raop_module_loaded")
             break
     #load raop module
-    if not raop_loaded:
-        log_message ("Raop module is not loaded", True, "raop_module_loaded")
     return raop_loaded
 
 def restart_pulseaudio (delete_os_loopbacks = False):
@@ -582,7 +620,7 @@ def wait_for_pulseaudio(timeout=10):
 def wait_for_journal():
     try:
         for i in range(5):
-            journal.send(MESSAGE="Test", SYSLOG_IDENTIFIER="audio-router")
+            journal.send(MESSAGE=f"Waiting for journal. Attempt {i+1}", SYSLOG_IDENTIFIER="audio-router")
             time.sleep(0.2)
     except Exception as e:
         print(f"Journald not ready: {e}")
@@ -598,12 +636,14 @@ LOG_FILE = "/tmp/audio-router.log"
 def log_message(message, push=False, push_title = "audio-router"):
     with open(LOG_FILE, "a") as f:
         f.write(f"{message}\n")
-    print(message)  # Also print to system logs for debugging
+    debug_print(message)  # Also print to system logs for debugging
     journal.send(MESSAGE = message, SYSLOG_IDENTIFIER="audio-router") # Write to journald 
     if push or "ERROR" in message.upper():
         send_push (push_title, message)
 
-
+def debug_print(*args, **kwargs):
+    if DEBUG:
+        print(*args, **kwargs)
 
 STATUS_FILE = "/tmp/audio-router-status.log"
 def write_status(message):

@@ -34,3 +34,15 @@ class FlashLedManager:
         self.flash_led(7)
         time.sleep(0.3)
         self.flash_led(35)
+    
+    #a longer flash used when completeing opposite action
+    #for example: when removing a loopback
+    def flash_ok_2(self):
+        #pause all flash procs 
+        self.remove_all_leds()
+
+        self.flash_led(35)
+        time.sleep(0.3)
+        self.flash_led(7)
+        time.sleep(0.3)
+        self.flash_led(7)
